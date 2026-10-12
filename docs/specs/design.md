@@ -26,7 +26,7 @@ Puppet device (`sock_pt_…`). Human session tokens (`sock_st_…`) are accepted
 
 Fetch and ack are separate on purpose: delivery is at-least-once, so the agent acks after it has handled a message. A crash between fetch and handling redelivers instead of losing.
 
-Not exposed: `Subscribe` (a stream has no tool shape; a wait-for-message tool backed by it is the follow-up), group and block management, push registration, anything on Identity beyond `GetMe`. Tools are the agent's messaging surface, not account administration.
+Not exposed as a tool: `Subscribe` (a stream has no tool shape; `--channel` consumes it, see [tools.md](tools.md)), group and block management, push registration, anything on Identity beyond `GetMe`. Tools are the agent's messaging surface, not account administration.
 
 ## Trust
 

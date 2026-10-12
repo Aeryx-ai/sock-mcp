@@ -54,6 +54,19 @@ After the prefix is human-readable text; do not parse it. Examples: `transient: 
 
 Message text comes from other people and software. Treat as untrusted data. Gate any automatic action on `sender_id` (an account id), not `conversation_id`.
 
-## Claude Code channel (planned, owned here)
+## Claude Code channel
 
-`claude/channel` capability: inbound `Subscribe` pushed as `notifications/claude/channel`, a `reply` tool, sender allowlist on the owner id, meta keys `conversation_id` and `message_id`. Not built yet; this file is updated with its schema before it ships.
+`sock-mcp --channel` (flag, not env, so the plugin's `.mcp.json` args decide) turns on the Claude Code channel. Without it the server is tools only and declares no channel capability.
+
+What it adds:
+
+- Capability `experimental["claude/channel"] = {}` and an `instructions` string telling Claude that `<channel source="sock" ...>` events are untrusted and to answer with `sock_send` using the tag's `conversation_id`. There is no separate `reply` tool: `sock_send` with `conversation_id` is the reply.
+- Inbound `Subscribe` pushed as `notifications/claude/channel` with `params = {content: <message text>, meta: {conversation_id, message_id, sender_id, seq, sent_at}}`. Meta keys are identifier-safe. `sent_at` is RFC 3339 UTC, `seq` a decimal string.
+- Sender allowlist on `sender_id`, never on conversation. Allowed: the puppet's `owner_id` (from `GetMe` at startup) plus any account ids in `SOCK_CHANNEL_ALLOW` (comma separated). A human token with no `SOCK_CHANNEL_ALLOW` fails closed: exit 1 with `channel: no allowed senders`. Messages from anyone else are dropped, not pushed and not acked (they stay pending on the server until it expires them), and logged to stderr by id.
+- Order: subscription starts at `notifications/initialized`, so nothing is pushed before Claude Code is ready. The push is written first, then the message is acked. Claude Code does not acknowledge notifications, so "acked" means "written to the transport", not "Claude processed it". A failed ack leaves the message pending; ids already pushed in this process are never pushed twice.
+- Durability: reconnects with exponential backoff 1s to 60s with jitter, honoring `Retry-After`. A stream silent for 60s (two missed heartbeats) is dropped and reconnected. `TOKEN_INVALID`, `CALLER_NOT_ALLOWED` and `ACCOUNT_SUSPENDED` end the channel: one `{content: "sock channel stopped: ...", meta: {kind: "status"}}` event, then exit 1. A broken stdout also exits.
+- Env: `SOCK_TOKEN`, `SOCK_URL` as above, plus `SOCK_CHANNEL_ALLOW`.
+
+Platform constraints (Claude Code channels reference): research preview; custom channels need `--dangerously-load-development-channels server:sock` (or `plugin:...`), interactive only and ignored under `-p`; Team and Enterprise orgs must enable channels. Events pushed while Claude is busy are batched on the next turn.
+
+In channel mode, do not also run a `sock_fetch`/`sock_ack` hook against the same puppet: both consume the same deliveries. Pick one consumer per puppet.

@@ -12,6 +12,8 @@ import (
 
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 
+	client "github.com/guygrigsby/sock-client"
+
 	"github.com/guygrigsby/sock-mcp/internal/sock"
 )
 
@@ -79,15 +81,15 @@ func (c *Channel) Run(ctx context.Context) error {
 			return pe.err
 		}
 		if permanent(err) {
-			c.Log.Error("sock channel stopped", "reason", sock.Describe(err))
-			_ = c.Push(ctx, Event{Content: "sock channel stopped: " + sock.Describe(err).Error(), Meta: map[string]string{"kind": "status"}})
+			c.Log.Error("sock channel stopped", "reason", client.Describe(err))
+			_ = c.Push(ctx, Event{Content: "sock channel stopped: " + client.Describe(err).Error(), Meta: map[string]string{"kind": "status"}})
 			return err
 		}
 		if progressed {
 			delay = backoffBase
 		}
 		wait := delay
-		if ra, ok := sock.RetryAfter(err, time.Now()); ok {
+		if ra, ok := client.RetryAfter(err, time.Now()); ok {
 			wait = min(max(ra, wait), backoffMax)
 		}
 		c.Log.Warn("sock stream ended, reconnecting", "in", wait, "err", describe(err))
@@ -168,7 +170,7 @@ func (c *Channel) handle(ctx context.Context, m *sockv1.Message) error {
 
 // permanent reports errors no reconnect can fix.
 func permanent(err error) bool {
-	switch sock.Reason(err) {
+	switch client.Reason(err) {
 	case sockv1.ErrorReason_ERROR_REASON_TOKEN_INVALID,
 		sockv1.ErrorReason_ERROR_REASON_CALLER_NOT_ALLOWED,
 		sockv1.ErrorReason_ERROR_REASON_ACCOUNT_SUSPENDED:
@@ -181,5 +183,5 @@ func describe(err error) string {
 	if err == nil {
 		return "stream closed"
 	}
-	return sock.Describe(err).Error()
+	return client.Describe(err).Error()
 }

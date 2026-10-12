@@ -12,7 +12,7 @@ Puppet device (`sock_pt_…`). Human session tokens (`sock_st_…`) are accepted
 
 ## Config
 
-`SOCK_TOKEN` (required) and `SOCK_URL` (default `https://api.sock.aeryx.ai`). Env only: MCP hosts launch servers with an `env` block. Same validation as sock-cli: https unless loopback, no credentials in the URL, token prefix and no whitespace. Errors never echo the URL or token. The token is sent only to the configured host, and redirects are never followed.
+`SOCK_TOKEN` (required) and `SOCK_URL` (default `https://api.sock.aeryx.ai`). Env only: MCP hosts launch servers with an `env` block. Validated by `sock-client`: https unless loopback, no credentials in the URL, token prefix and no whitespace. Errors never echo the URL or token. The token is sent only to the configured host, and redirects are never followed.
 
 ## Tools
 
@@ -36,6 +36,6 @@ Message text comes from other humans and puppets. It is untrusted input to the a
 
 Tool failures return `isError` with the same actionable text as sock-cli (`Describe`). Transient failures (`unavailable`, deadline, `RATE_LIMITED`) retry with exponential backoff, 4 attempts, honoring `Retry-After` in seconds or HTTP-date form, capped at 10s so a tool call cannot stall the agent. 30s per attempt. A throttled call returns a tool error rather than blocking.
 
-## Duplication
+## Shared client
 
-`internal/sock` (client, retry, error text) copies logic from sock-cli, whose copies are `internal`. Extract a shared public client module once both have settled.
+Config validation, the authenticated transport, retries and error text live in [`sock-client`](../../../client) (`github.com/guygrigsby/sock-client`), shared with sock-cli. sock-mcp adds env config, its short retry policy and the `transient:` / `permanent:` classification.

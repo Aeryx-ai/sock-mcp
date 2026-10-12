@@ -18,6 +18,8 @@ import (
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 	"github.com/guygrigsby/sock-contract/gen/go/sock/v1/sockv1connect"
 
+	client "github.com/guygrigsby/sock-client"
+
 	"github.com/guygrigsby/sock-mcp/internal/sock"
 )
 
@@ -92,7 +94,7 @@ func setup(t *testing.T, f *fake) (*Channel, *[]Event) {
 	mux.Handle(p, h)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	c := sock.New(sock.Config{URL: srv.URL, Token: "sock_pt_t"}, "test")
+	c := sock.New(client.Config{URL: srv.URL, Token: "sock_pt_t"}, "test")
 	var mu sync.Mutex
 	var got []Event
 	ch := &Channel{

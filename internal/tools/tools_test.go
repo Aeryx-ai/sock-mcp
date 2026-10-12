@@ -16,6 +16,8 @@ import (
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 	"github.com/guygrigsby/sock-contract/gen/go/sock/v1/sockv1connect"
 
+	client "github.com/guygrigsby/sock-client"
+
 	"github.com/guygrigsby/sock-mcp/internal/sock"
 	"github.com/guygrigsby/sock-mcp/internal/tools"
 )
@@ -123,7 +125,7 @@ func start(t *testing.T, f *fake) *mcp.ClientSession {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := sock.New(sock.Config{URL: srv.URL, Token: token}, "test")
+	c := sock.New(client.Config{URL: srv.URL, Token: token}, "test")
 	c.Retrier.Sleep = func(context.Context, time.Duration) error { return nil }
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: "test"}, nil)

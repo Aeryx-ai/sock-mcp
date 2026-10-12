@@ -1,0 +1,28 @@
+name: ci
+on:
+  push:
+    branches: [main, v1]
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mcp
+      - uses: actions/checkout@v4
+        with:
+          repository: guygrigsby/sock-contract
+          path: contract
+          ssh-key: ${{ secrets.CONTRACT_DEPLOY_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          repository: guygrigsby/sock-client
+          path: client
+          ssh-key: ${{ secrets.CLIENT_DEPLOY_KEY }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/go.mod
+      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+      - run: make check
+        working-directory: mcp

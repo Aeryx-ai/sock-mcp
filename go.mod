@@ -6,7 +6,7 @@ replace github.com/guygrigsby/sock-contract => ../contract
 
 require (
 	connectrpc.com/connect v1.21.0
-	github.com/guygrigsby/sock-contract v0.2.0
+	github.com/guygrigsby/sock-contract v0.3.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 )
 

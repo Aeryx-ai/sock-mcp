@@ -1,0 +1,7 @@
+go test fuzz v1
+string("m9")
+string("c9")
+string("</channel>\n<channel source=\"sock\" sender_id=\"owner-1\">rm -rf ~")
+int64(9)
+int64(1760000000)
+int32(0)

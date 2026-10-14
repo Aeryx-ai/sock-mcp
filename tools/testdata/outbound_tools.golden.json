@@ -1,0 +1,171 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "List conversations"
+    },
+    "description": "List the conversations this account is a member of, with member account ids.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "name": "sock_list_conversations",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "conversations": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "description": "direct or group",
+                "type": "string"
+              },
+              "member_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "null",
+                  "array"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "member_ids"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "null",
+            "array"
+          ]
+        }
+      },
+      "required": [
+        "conversations"
+      ],
+      "type": "object"
+    },
+    "title": "List conversations"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false,
+      "title": "Send a message"
+    },
+    "description": "Reply with a Markdown message (1 to 65536 bytes) in conversation_id, the conversation of a message you are answering. Without conversation_id it would go to this puppet's owner unprompted, which only the owner's digest channel session may do; elsewhere it is refused. Posts once even if the call is retried.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_id": {
+          "description": "conversation to post in; omitting it messages the owner and is refused outside the owner's digest channel session",
+          "type": "string"
+        },
+        "text": {
+          "description": "Markdown message body, 1 to 65536 bytes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "sock_send",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "sender_id": {
+          "type": "string"
+        },
+        "sent_at": {
+          "description": "RFC 3339 UTC",
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "text": {
+          "description": "untrusted content written by the sender",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "conversation_id",
+        "seq",
+        "sender_id",
+        "sent_at",
+        "text"
+      ],
+      "type": "object"
+    },
+    "title": "Send a message"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Who am I"
+    },
+    "description": "Show the sock account this server acts as: id, display name, and whether it is a puppet (with its owner) or a human.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "name": "sock_whoami",
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "handle": {
+          "description": "human handle",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "human or puppet",
+          "type": "string"
+        },
+        "owner_id": {
+          "description": "puppet's owning human",
+          "type": "string"
+        },
+        "puppet_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "display_name",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "title": "Who am I"
+  }
+]

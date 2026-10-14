@@ -36,45 +36,67 @@ type Policy struct {
 	Acked func(ids ...string)
 }
 
-// Register adds every sock tool to s.
+// Register adds every sock tool to s: the consuming surface, whose sock_send
+// acks the messages it names and whose sock_whoami reports the backlog.
 func Register(s *mcp.Server, c *sockclient.Client, p Policy) {
-	h := newHandlers(c, p)
-	registerOutbound(s, h)
+	h := &handlers{c: c, p: p}
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "sock_whoami",
+		Title:       whoamiTitle,
+		Description: "Show the sock account this server acts as: id, display name, whether it is a puppet (with its owner) or a human, and how many messages wait unacknowledged.",
+		Annotations: hints(whoamiTitle, true, false),
+	}, h.whoamiPending)
+	registerListConversations(s, h)
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "sock_send",
+		Title: sendTitle,
+		Description: sendDescription + " Put the message_id of each message the reply answers in message_ids: " +
+			"once the reply posts they are acknowledged and not delivered again.",
+		Annotations: hints(sendTitle, false, true),
+	}, h.send)
 	registerInbound(s, h)
-}
-
-func newHandlers(c *sockclient.Client, p Policy) *handlers {
-	return &handlers{c: c, p: p}
 }
 
 // RegisterOutbound registers only the tools that message the owner and look
 // around: sock_whoami, sock_list_conversations and sock_send. sock_fetch and
-// sock_ack consume deliveries, which something else (sock listen) owns.
+// sock_ack consume deliveries, which something else (sock listen, a channel
+// session) owns, so nothing here acks or counts deliveries: sock_send takes no
+// message_ids and sock_whoami reports no backlog. sock-mcpd serves this
+// surface and pins it (testdata/outbound_tools.golden.json).
 func RegisterOutbound(s *mcp.Server, c *sockclient.Client, p Policy) {
-	registerOutbound(s, newHandlers(c, p))
-}
-
-func registerOutbound(s *mcp.Server, h *handlers) {
+	h := &handlers{c: c, p: p}
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "sock_whoami",
-		Title:       "Who am I",
-		Description: "Show the sock account this server acts as: id, display name, whether it is a puppet (with its owner) or a human, and how many messages wait unacknowledged.",
-		Annotations: hints("Who am I", true, false),
+		Title:       whoamiTitle,
+		Description: "Show the sock account this server acts as: id, display name, and whether it is a puppet (with its owner) or a human.",
+		Annotations: hints(whoamiTitle, true, false),
 	}, h.whoami)
+	registerListConversations(s, h)
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "sock_send",
+		Title:       sendTitle,
+		Description: sendDescription,
+		Annotations: hints(sendTitle, false, true),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in OutboundSendIn) (*mcp.CallToolResult, Message, error) {
+		return h.send(ctx, req, SendIn{OutboundSendIn: in})
+	})
+}
+
+const (
+	whoamiTitle     = "Who am I"
+	sendTitle       = "Send a message"
+	sendDescription = "Reply with a Markdown message (1 to 65536 bytes) in conversation_id, the conversation of a message you are answering. " +
+		"Without conversation_id it would go to this puppet's owner unprompted, which only the owner's digest channel session may do; elsewhere it is refused. " +
+		"Posts once even if the call is retried."
+)
+
+func registerListConversations(s *mcp.Server, h *handlers) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "sock_list_conversations",
 		Title:       "List conversations",
 		Description: "List the conversations this account is a member of, with member account ids.",
 		Annotations: hints("List conversations", true, false),
 	}, h.listConversations)
-	mcp.AddTool(s, &mcp.Tool{
-		Name:  "sock_send",
-		Title: "Send a message",
-		Description: "Reply with a Markdown message (1 to 65536 bytes) in conversation_id, the conversation of a message you are answering. " +
-			"Without conversation_id it would go to this puppet's owner unprompted, which only the owner's digest channel session may do; elsewhere it is refused. " +
-			"Posts once even if the call is retried. Put the message_id of each message the reply answers in message_ids: once the reply posts they are acknowledged and not delivered again.",
-		Annotations: hints("Send a message", false, true),
-	}, h.send)
 }
 
 func registerInbound(s *mcp.Server, h *handlers) {
@@ -117,8 +139,12 @@ type Account struct {
 	Handle      string `json:"handle,omitempty" jsonschema:"human handle"`
 	OwnerID     string `json:"owner_id,omitempty" jsonschema:"puppet's owning human"`
 	PuppetName  string `json:"puppet_name,omitempty"`
-	// PendingUnacked is set only by sock_whoami, and omitted when the hub could
-	// not be asked.
+}
+
+// WhoamiOut is the consuming surface's sock_whoami result: the account and
+// its backlog, omitted when the hub could not be asked.
+type WhoamiOut struct {
+	Account
 	PendingUnacked *int `json:"pending_unacked,omitempty" jsonschema:"messages delivered to this account and not yet acknowledged, counting at most 500"`
 }
 
@@ -150,7 +176,15 @@ func (h *handlers) whoami(ctx context.Context, _ *mcp.CallToolRequest, _ struct{
 	if err != nil {
 		return nil, Account{}, err
 	}
-	out := account(a)
+	return nil, account(a), nil
+}
+
+func (h *handlers) whoamiPending(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, WhoamiOut, error) {
+	_, a, err := h.whoami(ctx, req, in)
+	if err != nil {
+		return nil, WhoamiOut{}, err
+	}
+	out := WhoamiOut{Account: a}
 	// The backlog is a hint: a hub that will not say leaves it out rather than
 	// failing who-am-I.
 	pending, err := sockclient.Call(ctx, h.c, func(ctx context.Context) (int, error) {
@@ -191,9 +225,15 @@ func (h *handlers) listConversations(ctx context.Context, _ *mcp.CallToolRequest
 
 // SendIn is the sock_send input.
 type SendIn struct {
-	Text           string   `json:"text" jsonschema:"Markdown message body, 1 to 65536 bytes"`
-	ConversationID string   `json:"conversation_id,omitempty" jsonschema:"conversation to post in; omitting it messages the owner and is refused outside the owner's digest channel session"`
-	MessageIDs     []string `json:"message_ids,omitempty" jsonschema:"ids of the messages this reply answers, from their channel tags or sock_fetch; acknowledged once the reply posts"`
+	OutboundSendIn
+	MessageIDs []string `json:"message_ids,omitempty" jsonschema:"ids of the messages this reply answers, from their channel tags or sock_fetch; acknowledged once the reply posts"`
+}
+
+// OutboundSendIn is the outbound surface's sock_send input: no message_ids,
+// since an outbound session owns no deliveries to ack.
+type OutboundSendIn struct {
+	Text           string `json:"text" jsonschema:"Markdown message body, 1 to 65536 bytes"`
+	ConversationID string `json:"conversation_id,omitempty" jsonschema:"conversation to post in; omitting it messages the owner and is refused outside the owner's digest channel session"`
 }
 
 // errNotifyOwner is sock_send's answer to a message for the owner from a

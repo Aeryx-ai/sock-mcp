@@ -23,9 +23,9 @@ All outputs are returned as MCP `structuredContent` (and mirrored as JSON text).
 
 | Tool | Wraps | Input | Output |
 |---|---|---|---|
-| `sock_whoami` | `GetMe`, then `FetchPending` (limit 500) | none | `{id, display_name, kind: "human"\|"puppet", handle?, owner_id?, puppet_name?, pending_unacked?: int}`. `pending_unacked` counts at most 500 and is absent when `FetchPending` failed. The hub has no count, so this reads up to 500 whole messages |
+| `sock_whoami` | `GetMe`, then `FetchPending` (limit 500; not under `--outbound-only`) | none | `{id, display_name, kind: "human"\|"puppet", handle?, owner_id?, puppet_name?, pending_unacked?: int}`. `pending_unacked` counts at most 500 and is absent when `FetchPending` failed. The hub has no count, so this reads up to 500 whole messages |
 | `sock_list_conversations` | `ListConversations` | none | `{conversations: [{id, kind: "direct"\|"group", member_ids: [string]}]}` |
-| `sock_send` | `NotifyOwner` when `conversation_id` is absent, else `Send`; then `Ack` of `message_ids` once posted | `{text: string (1..65536 bytes, Markdown), conversation_id?: string, message_ids?: [string]}` | the sent `Message` |
+| `sock_send` | `NotifyOwner` when `conversation_id` is absent, else `Send`; then `Ack` of `message_ids` once posted (no `message_ids` under `--outbound-only`) | `{text: string (1..65536 bytes, Markdown), conversation_id?: string, message_ids?: [string]}` | the sent `Message` |
 | `sock_fetch` | `FetchPending` | `{limit?: int}` default 50, clamped to 200 | `{messages: [Message]}` oldest first per conversation. Does not ack |
 | `sock_ack` | `Ack` | `{message_ids: [string]}` 1..500 | `{acked: int}` (ids submitted; unknown ids are ignored by the server). For messages that need no reply |
 
@@ -84,4 +84,4 @@ In channel mode, do not also run a `sock_fetch`/`sock_ack` hook against the same
 
 ## Outbound only
 
-`--outbound-only` registers only `sock_whoami`, `sock_list_conversations` and `sock_send`; names, schemas and descriptions are unchanged. `sock_fetch` and `sock_ack` consume deliveries, so an agent beside `sock listen` (one consumer per puppet) must not see them, and a host without a tool filter (a Codex plugin's `mcp.json`) needs the server to enforce it. Combined with `--channel` it is a usage error, since the channel consumes deliveries. The initialize `instructions` say the inbound tools are absent on purpose. Default behavior is unchanged.
+`--outbound-only` registers only `sock_whoami`, `sock_list_conversations` and `sock_send`, without the consuming fields: `sock_send` takes no `message_ids` and acks nothing, and `sock_whoami` has no `pending_unacked`, since an outbound session owns no deliveries. Its `tools/list` is pinned byte for byte in `tools/testdata/outbound_tools.golden.json`, which sock-mcpd's golden matches. `sock_fetch` and `sock_ack` consume deliveries, so an agent beside `sock listen` (one consumer per puppet) must not see them, and a host without a tool filter (a Codex plugin's `mcp.json`) needs the server to enforce it. Combined with `--channel` it is a usage error, since the channel consumes deliveries. The initialize `instructions` say the inbound tools are absent on purpose. Default behavior is unchanged.

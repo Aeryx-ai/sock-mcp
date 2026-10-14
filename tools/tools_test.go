@@ -149,6 +149,12 @@ func start(t *testing.T, f *fake) *mcp.ClientSession {
 // startWith is start with the given policy.
 func startWith(t *testing.T, f *fake, p tools.Policy) *mcp.ClientSession {
 	t.Helper()
+	return startSurface(t, f, func(s *mcp.Server, c *sockclient.Client, _ tools.Policy) { tools.Register(s, c, p) })
+}
+
+// startSurface is start with the tools register adds.
+func startSurface(t *testing.T, f *fake, register func(*mcp.Server, *sockclient.Client, tools.Policy)) *mcp.ClientSession {
+	t.Helper()
 	mux := http.NewServeMux()
 	idPath, idH := sockv1connect.NewIdentityServiceHandler(f)
 	msgPath, msgH := sockv1connect.NewMessagingServiceHandler(f)
@@ -166,7 +172,7 @@ func startWith(t *testing.T, f *fake, p tools.Policy) *mcp.ClientSession {
 	c.Retrier.Sleep = func(context.Context, time.Duration) error { return nil }
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: "test"}, nil)
-	tools.Register(s, c, p)
+	register(s, c, tools.Policy{})
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := t.Context()
 	ss, err := s.Connect(ctx, st, nil)

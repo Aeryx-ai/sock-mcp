@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -61,6 +62,21 @@ func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) s
 		if dir, err = os.Getwd(); err != nil {
 			return cfg, fmt.Errorf("project puppet: %w", err)
 		}
+		why, err := notAProject(ctx, dir, getenv("PLUGIN_ROOT"))
+		if err != nil {
+			return cfg, fmt.Errorf("project puppet: %w", err)
+		}
+		if why != "" {
+			fb, path, ok, err := sockclient.FilePuppetConfig(getenv)
+			if err != nil {
+				return cfg, err
+			}
+			if !ok {
+				return cfg, errors.New(noProjectErr)
+			}
+			_, _ = fmt.Fprintf(stderr, "sock-mcp: %s, so no project puppet; using puppet_token from %s\n", why, path)
+			return fb, nil
+		}
 	}
 	projects := &client.Projects{
 		API:  client.NewPuppetAPI(client.New(cfg, "sock-mcp/"+version), client.DefaultRetrier()),
@@ -82,6 +98,44 @@ func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) s
 	}
 	cfg.Token = tok
 	return cfg, nil
+}
+
+// noProjectErr is the failure when the working directory names no project
+// and the config file has no puppet_token to fall back to.
+const noProjectErr = "no project directory: Codex plugin servers start in the plugin root; use the config.toml route for per-project puppets"
+
+// notAProject says why the working directory dir names no project, or "" when
+// it does. A Codex plugin server starts in the plugin cache with no project
+// variable (a config.toml server starts in the project): a directory inside
+// pluginRoot, or outside any git repository, would mint a puppet for the
+// plugin rather than the project.
+func notAProject(ctx context.Context, dir, pluginRoot string) (string, error) {
+	if pluginRoot != "" && within(dir, pluginRoot) {
+		return "the working directory is inside PLUGIN_ROOT", nil
+	}
+	in, err := client.InRepository(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	if !in {
+		return "the working directory is not in a git repository", nil
+	}
+	return "", nil
+}
+
+// within reports whether dir is root or below it, symlinks resolved.
+func within(dir, root string) bool {
+	resolve := func(p string) string {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		return p
+	}
+	rel, err := filepath.Rel(resolve(root), resolve(dir))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // outboundInstructions tells the model the inbound tools are absent on purpose,

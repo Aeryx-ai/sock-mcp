@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -457,27 +458,53 @@ func TestMachineKeyKeepsEachHubsPuppetApart(t *testing.T) {
 	}
 }
 
-// sock-cli-qb6: Codex starts sock-mcp with neither SOCK_TOKEN nor
-// CLAUDE_PROJECT_DIR; the config file's machine_key and the working directory
-// still give it the project's own puppet.
-func TestFileMachineKeyRunsAsTheWorkingDirectorysPuppet(t *testing.T) {
-	f := &fakeSock{}
-	base := serve(t, f)
+// codexEnv is a Codex start: no SOCK_TOKEN, no CLAUDE_PROJECT_DIR, the
+// config file pointing at the fake with a machine key plus extra lines, and
+// the working directory cwd. pluginRoot, when set, is PLUGIN_ROOT.
+func codexEnv(t *testing.T, base func(string) string, extra, cwd, pluginRoot string) func(string) string {
+	t.Helper()
 	cfgHome := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cfgHome, "sock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body := fmt.Sprintf("url = %q\nmachine_key = \"sock_mk_dev_machinesecret\"\npuppet_token = \"sock_pt_shared\"\n", base("SOCK_URL"))
+	body := fmt.Sprintf("url = %q\nmachine_key = \"sock_mk_dev_machinesecret\"\n%s", base("SOCK_URL"), extra)
 	if err := os.WriteFile(filepath.Join(cfgHome, "sock", "config.toml"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	proj := filepath.Join(t.TempDir(), "codexproj")
-	if err := os.Mkdir(proj, 0o755); err != nil {
+	t.Chdir(cwd)
+	env := map[string]string{"XDG_CONFIG_HOME": cfgHome, "XDG_STATE_HOME": filepath.Join(t.TempDir(), "state"), "HOME": t.TempDir()}
+	if pluginRoot != "" {
+		env["PLUGIN_ROOT"] = pluginRoot
+	}
+	return func(k string) string { return env[k] }
+}
+
+func mkdir(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(proj)
-	env := map[string]string{"XDG_CONFIG_HOME": cfgHome, "XDG_STATE_HOME": filepath.Join(t.TempDir(), "state"), "HOME": t.TempDir()}
-	handshake(t, []string{"--outbound-only"}, func(k string) string { return env[k] })
+	return dir
+}
+
+func gitRepo(t *testing.T, dir string) string {
+	t.Helper()
+	mkdir(t, dir)
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	return dir
+}
+
+// sock-cli-qb6: Codex starts a config.toml server in the project with neither
+// SOCK_TOKEN nor CLAUDE_PROJECT_DIR; the file's machine_key and the working
+// directory's repository give it the project's own puppet.
+func TestFileMachineKeyRunsAsTheWorkingDirectorysPuppet(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	proj := gitRepo(t, filepath.Join(t.TempDir(), "codexproj"))
+	getenv := codexEnv(t, base, "puppet_token = \"sock_pt_shared\"\n", mkdir(t, filepath.Join(proj, "sub")), "")
+	handshake(t, []string{"--outbound-only"}, getenv)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.creates) != 1 || !strings.HasPrefix(f.creates[0], "codexproj on ") || f.createAuth != "Bearer sock_mk_dev_machinesecret" {
@@ -487,5 +514,55 @@ func TestFileMachineKeyRunsAsTheWorkingDirectorysPuppet(t *testing.T) {
 		if a != "Bearer sock_pt_projdev_secret" {
 			t.Fatalf("a call went out as %q", a)
 		}
+	}
+}
+
+// A Codex plugin server starts in the plugin cache, inside PLUGIN_ROOT: no
+// project there, so the shared puppet_token, said once on stderr.
+func TestPluginRootFallsBackToThePuppetToken(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
+	getenv := codexEnv(t, base, "puppet_token = \"sock_pt_shared\"\n", mkdir(t, filepath.Join(root, "bin")), root)
+	cfg, err := sockclient.LoadConfig(getenv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	got, err := projectPuppet(t.Context(), cfg, getenv, &stderr)
+	if err != nil || got.Token != "sock_pt_shared" || got.URL != base("SOCK_URL") {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if len(f.creates) != 0 {
+		t.Fatalf("minted %v in the plugin root", f.creates)
+	}
+	if n := strings.Count(stderr.String(), "\n"); n != 1 || !strings.Contains(stderr.String(), "puppet_token") || strings.Contains(stderr.String(), "secret") || strings.Contains(stderr.String(), "sock_") {
+		t.Fatalf("stderr %q", stderr.String())
+	}
+}
+
+func TestNoProjectWithoutAPuppetTokenFails(t *testing.T) {
+	for name, pluginRoot := range map[string]bool{"plugin root": true, "not a repository": false} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeSock{}
+			base := serve(t, f)
+			dir := mkdir(t, filepath.Join(t.TempDir(), "cache"))
+			root := ""
+			if pluginRoot {
+				gitRepo(t, dir)
+				root = dir
+			}
+			getenv := codexEnv(t, base, "", dir, root)
+			cfg, err := sockclient.LoadConfig(getenv, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := projectPuppet(t.Context(), cfg, getenv, io.Discard); err == nil || err.Error() != "no project directory: Codex plugin servers start in the plugin root; use the config.toml route for per-project puppets" {
+				t.Fatalf("err = %v", err)
+			}
+			if len(f.creates) != 0 {
+				t.Fatalf("minted %v", f.creates)
+			}
+		})
 	}
 }

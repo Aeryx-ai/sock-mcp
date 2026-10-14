@@ -53,16 +53,42 @@ func LoadConfig(getenv func(string) string, logf func(format string, args ...any
 			if logf != nil && (getenv("SOCK_URL") != "" || getenv("SOCK_ACCESS_GATE") != "") {
 				logf("sock-mcp: ignoring SOCK_URL and SOCK_ACCESS_GATE: the token comes from %s, so the URL and gate do too", path)
 			}
-			c = client.Config{URL: client.DefaultURL, Token: tok, AccessGate: strings.TrimSpace(fc.AccessGate)}
-			if fc.URL != "" {
-				c.URL = fc.URL
-			}
+			c = fileServer(fc, tok)
 		}
 	}
 	if err := client.Validate(c); err != nil {
 		return client.Config{}, err
 	}
 	return c, nil
+}
+
+// FilePuppetConfig is the config file's puppet_token with the file's url and
+// gate, for when a machine key names no project; ok is false when the file
+// holds no puppet_token. path is the file, for a log line.
+func FilePuppetConfig(getenv func(string) string) (c client.Config, path string, ok bool, err error) {
+	fc, path, err := fileConfig(getenv)
+	if err != nil {
+		return client.Config{}, path, false, err
+	}
+	tok, err := puppetToken(fc, path)
+	if err != nil || tok == "" {
+		return client.Config{}, path, false, err
+	}
+	c = fileServer(fc, tok)
+	if err := client.Validate(c); err != nil {
+		return client.Config{}, path, false, err
+	}
+	return c, path, true, nil
+}
+
+// fileServer is tok with the file's url (else DefaultURL) and gate: a token
+// from the file goes only where the file says.
+func fileServer(fc client.FileConfig, tok string) client.Config {
+	c := client.Config{URL: client.DefaultURL, Token: tok, AccessGate: strings.TrimSpace(fc.AccessGate)}
+	if fc.URL != "" {
+		c.URL = fc.URL
+	}
+	return c
 }
 
 // fileToken is the credential the config file gives sock-mcp: machine_key
@@ -75,6 +101,11 @@ func fileToken(fc client.FileConfig, path string) (string, error) {
 		}
 		return mk, nil
 	}
+	return puppetToken(fc, path)
+}
+
+// puppetToken is the file's puppet_token, "" when unset.
+func puppetToken(fc client.FileConfig, path string) (string, error) {
 	pt := strings.TrimSpace(fc.PuppetToken)
 	if pt != "" && client.TokenKind(pt) != client.KindPuppet {
 		return "", fmt.Errorf("puppet_token in %s is not a puppet token (sock_pt_...); run sock puppets use <puppet id>", path)

@@ -11,9 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"connectrpc.com/connect"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -48,98 +46,21 @@ func legacyHandshakeVersions() []string {
 	return out
 }
 
-// projectPuppet turns a machine key into the token of this project's puppet
-// (ADR 10). Any other credential is returned as it is. The machine key reaches
-// the hub only to make, list and erase puppets; every tool call goes out as the
-// puppet. A failure never carries the key.
+// projectPuppet is sock-client's ProjectPuppet with sock-mcp's options: a
+// machine key becomes the token of this project's puppet (ADR 10).
 func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) string, stderr io.Writer) (client.Config, error) {
-	if client.TokenKind(cfg.Token) != client.KindMachineKey {
-		return cfg, nil
-	}
-	dir := getenv("CLAUDE_PROJECT_DIR")
-	if dir == "" {
-		var err error
-		if dir, err = os.Getwd(); err != nil {
-			return cfg, fmt.Errorf("project puppet: %w", err)
-		}
-		why, err := notAProject(ctx, dir, getenv("PLUGIN_ROOT"))
-		if err != nil {
-			return cfg, fmt.Errorf("project puppet: %w", err)
-		}
-		if why != "" && strings.TrimSpace(getenv("SOCK_TOKEN")) != "" {
-			// one source, never a mix: an env key never falls back to the file
-			return cfg, fmt.Errorf("no project directory: %s; set CLAUDE_PROJECT_DIR or start sock-mcp in the project's repository", why)
-		}
-		if why != "" {
-			fb, path, ok, err := sockclient.FilePuppetConfig(getenv)
-			if err != nil {
-				return cfg, err
-			}
-			if !ok {
-				return cfg, errors.New(noProjectErr)
-			}
-			_, _ = fmt.Fprintf(stderr, "sock-mcp: %s, so no project puppet; using puppet_token from %s\n", why, path)
-			return fb, nil
-		}
-	}
-	projects := &client.Projects{
-		API:  client.NewPuppetAPI(client.New(cfg, "sock-mcp/"+version), client.DefaultRetrier()),
-		Dir:  client.ProjectsDir(getenv, cfg),
-		Host: client.ShortHost(),
-		Log:  func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, "sock-mcp: "+f+"\n", a...) },
-	}
-	// a cached token the hub rejects (the puppet was erased) is replaced
-	projects.Check = client.NewTokenCheck(cfg, "sock-mcp/"+version)
-	// separate budgets: a slow sweep must not leave Ensure without time
-	sweepCtx, cancelSweep := context.WithTimeout(ctx, 20*time.Second)
-	projects.Sweep(sweepCtx)
-	cancelSweep()
-	ensureCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	tok, err := projects.Ensure(ensureCtx, dir)
-	if err != nil {
-		return cfg, errors.New(strings.ReplaceAll(err.Error(), cfg.Token, "[redacted]"))
-	}
-	cfg.Token = tok
-	return cfg, nil
+	return client.ProjectPuppet(ctx, cfg, puppetOptions(getenv, stderr))
 }
 
-// noProjectErr is the failure when the working directory names no project
-// and the config file has no puppet_token to fall back to.
-const noProjectErr = "no project directory: Codex plugin servers start in the plugin root; use the config.toml route for per-project puppets"
-
-// notAProject says why the working directory dir names no project, or "" when
-// it does. A Codex plugin server starts in the plugin cache with no project
-// variable (a config.toml server starts in the project): a directory inside
-// pluginRoot, or outside any git repository, would mint a puppet for the
-// plugin rather than the project.
-func notAProject(ctx context.Context, dir, pluginRoot string) (string, error) {
-	if pluginRoot != "" && within(dir, pluginRoot) {
-		return "the working directory is inside PLUGIN_ROOT", nil
+// puppetOptions are sock-mcp's inputs to sock-client's puppet resolution: the
+// project is CLAUDE_PROJECT_DIR, else the working directory.
+func puppetOptions(getenv func(string) string, stderr io.Writer) client.PuppetOptions {
+	return client.PuppetOptions{
+		Getenv:        getenv,
+		NoProjectHint: "set CLAUDE_PROJECT_DIR or start sock-mcp in the project's repository",
+		UserAgent:     "sock-mcp/" + version,
+		Log:           sockclient.Prefixed(func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) }),
 	}
-	in, err := client.InRepository(ctx, dir)
-	if err != nil {
-		return "", err
-	}
-	if !in {
-		return "the working directory is not in a git repository", nil
-	}
-	return "", nil
-}
-
-// within reports whether dir is root or below it, symlinks resolved.
-func within(dir, root string) bool {
-	resolve := func(p string) string {
-		if abs, err := filepath.Abs(p); err == nil {
-			p = abs
-		}
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			p = r
-		}
-		return p
-	}
-	rel, err := filepath.Rel(resolve(root), resolve(dir))
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // outboundInstructions tells the model the inbound tools are absent on purpose,
@@ -167,11 +88,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 	if *outbound && *channelMode {
 		return errors.New("--outbound-only and --channel cannot be combined: the channel consumes deliveries")
 	}
-	cfg, err := sockclient.LoadConfig(getenv, func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) })
+	cfg, err := client.ResolvePuppet(ctx, puppetOptions(getenv, stderr))
 	if err != nil {
-		return err
-	}
-	if cfg, err = projectPuppet(ctx, cfg, getenv, stderr); err != nil {
 		return err
 	}
 	client := sockclient.New(cfg, version)

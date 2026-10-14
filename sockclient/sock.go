@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	client "github.com/guygrigsby/sock-client"
@@ -29,99 +28,21 @@ func New(cfg client.Config, version string) *Client {
 	}
 }
 
-// LoadConfig resolves the configuration from one source, never a mix, so a
-// token is only ever sent to the URL that came with it. With SOCK_TOKEN set it
-// is SOCK_URL, SOCK_TOKEN and SOCK_ACCESS_GATE from getenv and the CLI's config
-// file is not read. With SOCK_TOKEN unset (a host such as a Codex plugin starts
-// the server without the environment) it is the url and access_gate of the
-// CLI's config file (mode 0600 when it holds a secret) with its machine_key
-// (`sock machine-key use` writes it), else its puppet_token (`sock puppets use`
-// writes it); the human's token is never used. An ambient SOCK_URL or
-// SOCK_ACCESS_GATE is then ignored, and logf (may be nil) says so once. The
-// gate goes to the configured host only, as sock-client's transport sends it.
+// LoadConfig is sock-client's LoadPuppetConfig: SOCK_TOKEN with SOCK_URL and
+// SOCK_ACCESS_GATE, else the CLI config file's machine_key, else its
+// puppet_token, with the file's url and gate; never the human's token. logf
+// (may be nil) hears, once, that an ambient SOCK_URL or SOCK_ACCESS_GATE is
+// ignored.
 func LoadConfig(getenv func(string) string, logf func(format string, args ...any)) (client.Config, error) {
-	c := client.Config{URL: client.DefaultURL, Token: strings.TrimSpace(getenv("SOCK_TOKEN")), AccessGate: strings.TrimSpace(getenv("SOCK_ACCESS_GATE"))}
-	if v := getenv("SOCK_URL"); v != "" {
-		c.URL = v
-	}
-	if c.Token == "" {
-		if fc, path, err := fileConfig(getenv); err != nil {
-			return client.Config{}, err
-		} else if tok, err := fileToken(fc, path); err != nil {
-			return client.Config{}, err
-		} else if tok != "" {
-			if logf != nil && (getenv("SOCK_URL") != "" || getenv("SOCK_ACCESS_GATE") != "") {
-				logf("sock-mcp: ignoring SOCK_URL and SOCK_ACCESS_GATE: the token comes from %s, so the URL and gate do too", path)
-			}
-			c = fileServer(fc, tok)
-		}
-	}
-	if err := client.Validate(c); err != nil {
-		return client.Config{}, err
-	}
-	return c, nil
+	return client.LoadPuppetConfig(client.PuppetOptions{Getenv: getenv, Log: Prefixed(logf)})
 }
 
-// FilePuppetConfig is the config file's puppet_token with the file's url and
-// gate, for when a machine key names no project; ok is false when the file
-// holds no puppet_token. path is the file, for a log line.
-func FilePuppetConfig(getenv func(string) string) (c client.Config, path string, ok bool, err error) {
-	fc, path, err := fileConfig(getenv)
-	if err != nil {
-		return client.Config{}, path, false, err
+// Prefixed is logf with every line starting "sock-mcp: ", nil when logf is.
+func Prefixed(logf func(format string, args ...any)) func(format string, args ...any) {
+	if logf == nil {
+		return nil
 	}
-	tok, err := puppetToken(fc, path)
-	if err != nil || tok == "" {
-		return client.Config{}, path, false, err
-	}
-	c = fileServer(fc, tok)
-	if err := client.Validate(c); err != nil {
-		return client.Config{}, path, false, err
-	}
-	return c, path, true, nil
-}
-
-// fileServer is tok with the file's url (else DefaultURL) and gate: a token
-// from the file goes only where the file says.
-func fileServer(fc client.FileConfig, tok string) client.Config {
-	c := client.Config{URL: client.DefaultURL, Token: tok, AccessGate: strings.TrimSpace(fc.AccessGate)}
-	if fc.URL != "" {
-		c.URL = fc.URL
-	}
-	return c
-}
-
-// fileToken is the credential the config file gives sock-mcp: machine_key
-// first, so each project gets its own puppet, then puppet_token. "" means
-// neither is set. An error names the key, never its value.
-func fileToken(fc client.FileConfig, path string) (string, error) {
-	if mk := strings.TrimSpace(fc.MachineKey); mk != "" {
-		if client.TokenKind(mk) != client.KindMachineKey {
-			return "", fmt.Errorf("machine_key in %s is not a machine key (sock_mk_...); run sock machine-key use", path)
-		}
-		return mk, nil
-	}
-	return puppetToken(fc, path)
-}
-
-// puppetToken is the file's puppet_token, "" when unset.
-func puppetToken(fc client.FileConfig, path string) (string, error) {
-	pt := strings.TrimSpace(fc.PuppetToken)
-	if pt != "" && client.TokenKind(pt) != client.KindPuppet {
-		return "", fmt.Errorf("puppet_token in %s is not a puppet token (sock_pt_...); run sock puppets use <puppet id>", path)
-	}
-	return pt, nil
-}
-
-// fileConfig reads the CLI's config file. No home directory, or no file, is an
-// empty config, not an error: the caller reports the missing token.
-func fileConfig(getenv func(string) string) (client.FileConfig, string, error) {
-	path, err := client.DefaultConfigPath(getenv)
-	if err != nil {
-		return client.FileConfig{}, "", nil
-	}
-	fc, err := client.LoadFileConfig(path)
-	return fc, path, err
+	return func(format string, args ...any) { logf("sock-mcp: "+format, args...) }
 }
 
 // Call runs one unary RPC with the client's retry policy. The error is

@@ -1,6 +1,6 @@
 module github.com/guygrigsby/sock-mcp
 
-go 1.26.2
+go 1.26.9
 
 replace github.com/guygrigsby/sock-contract => ../contract
 

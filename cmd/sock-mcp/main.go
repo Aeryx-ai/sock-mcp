@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -116,16 +117,26 @@ func run(ctx context.Context, args []string, getenv func(string) string, digest 
 	}
 	var ch *channel.Channel
 	tr := &channel.Transport{Inner: transport}
+	ledger := &tools.Ledger{}
 	if *channelMode {
-		allow, err := allowlist(ctx, client, getenv)
+		me, allow, err := allowlist(ctx, client, getenv)
 		if err != nil {
 			return err
 		}
+		dir, err := channel.CountsDir(getenv, me)
+		if err != nil {
+			return err
+		}
+		counts, err := channel.OpenCounts(dir, time.Now())
+		if err != nil {
+			return err
+		}
+		ledger.Forget = counts.Forget
 		opts.Capabilities = &mcp.ServerCapabilities{
 			Experimental: map[string]any{"claude/channel": map[string]any{}},
 		}
 		opts.Instructions = channel.Instructions
-		ch = &channel.Channel{Client: client, Allow: allow, Push: tr.Push, Log: slog.New(slog.NewTextHandler(stderr, nil))}
+		ch = &channel.Channel{Client: client, Allow: allow, Push: tr.Push, Counts: counts, Shown: ledger.Record, Log: slog.New(slog.NewTextHandler(stderr, nil))}
 	}
 	// Events pushed before the client finishes initializing can be dropped,
 	// so the subscription starts at notifications/initialized.
@@ -136,7 +147,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, digest 
 		}
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: version}, opts)
-	policy := tools.Policy{NotifyOwner: digest}
+	policy := tools.Policy{NotifyOwner: digest, Ledger: ledger}
 	if *outbound {
 		tools.RegisterOutbound(s, client, policy)
 	} else {
@@ -157,9 +168,10 @@ func run(ctx context.Context, args []string, getenv func(string) string, digest 
 	}
 }
 
-// allowlist is the sender ids the channel may push: the puppet's owner plus
-// SOCK_CHANNEL_ALLOW (comma separated account ids). Empty fails closed.
-func allowlist(ctx context.Context, c *sockclient.Client, getenv func(string) string) (map[string]bool, error) {
+// allowlist is this account's id and the sender ids the channel may push: the
+// puppet's owner plus SOCK_CHANNEL_ALLOW (comma separated account ids). Empty
+// fails closed.
+func allowlist(ctx context.Context, c *sockclient.Client, getenv func(string) string) (string, map[string]bool, error) {
 	allow := map[string]bool{}
 	me, err := sockclient.Call(ctx, c, func(ctx context.Context) (*sockv1.Account, error) {
 		res, err := c.Identity.GetMe(ctx, connect.NewRequest(&sockv1.GetMeRequest{}))
@@ -169,7 +181,7 @@ func allowlist(ctx context.Context, c *sockclient.Client, getenv func(string) st
 		return res.Msg.GetAccount(), nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("channel: look up own account: %w", err)
+		return "", nil, fmt.Errorf("channel: look up own account: %w", err)
 	}
 	if p := me.GetPuppet(); p != nil {
 		allow[p.GetOwnerId()] = true
@@ -180,7 +192,7 @@ func allowlist(ctx context.Context, c *sockclient.Client, getenv func(string) st
 		}
 	}
 	if len(allow) == 0 {
-		return nil, errors.New("channel: no allowed senders: use a puppet token, or set SOCK_CHANNEL_ALLOW to account ids")
+		return "", nil, errors.New("channel: no allowed senders: use a puppet token, or set SOCK_CHANNEL_ALLOW to account ids")
 	}
-	return allow, nil
+	return me.GetId(), allow, nil
 }

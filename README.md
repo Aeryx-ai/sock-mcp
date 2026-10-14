@@ -42,4 +42,10 @@ With `--channel` the server offers MCP protocol versions only up to 2025-11-25. 
 
 `sock-mcp --channel` pushes messages from your puppet's owner into the running session. Only the owner (and ids in `SOCK_CHANNEL_ALLOW`) can reach Claude this way. Needs `--dangerously-load-development-channels` during the research preview. Details: [docs/specs/tools.md](docs/specs/tools.md).
 
+A push never acknowledges a message. Claude Code drops channel notifications silently in a session started without the channel flags, and the `initialize` it sends is byte for byte the same with and without them (Claude Code 2.1.300, probed live), so sock-mcp cannot tell whether anything was shown. The model's own action acknowledges: a `sock_send` reply acknowledges the messages it was shown in that conversation, and `sock_ack` the ones that need no reply. Until then the message stays queued at the hub for a session that shows it, or for `sock_fetch`.
+
+A message is pushed at most 5 times without being acted on, counted across restarts in `${XDG_STATE_HOME:-~/.local/state}/sock-mcp/pushes/` (mode 700, one 600 file per message, removed on ack and after the hub's 30 day retention; an unreadable count counts as spent). After that it is only reachable with `sock_fetch`. `sock_whoami` reports `pending_unacked`.
+
+A puppet whose sessions never act keeps every message queued until the hub deletes it 30 days after it was sent. The hub's `Subscribe` and `FetchPending` read only the 500 oldest pending messages, so once 500 sit unacknowledged a newer one, the owner's next reply included, reaches no session until older ones are acknowledged or expire. Clear a backlog with `sock_fetch` then `sock_ack`.
+
 MIT licensed.

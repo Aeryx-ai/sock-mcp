@@ -3,9 +3,13 @@ package channel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -90,25 +94,36 @@ func sendAll(rs ...*sockv1.SubscribeResponse) script {
 
 func setup(t *testing.T, f *fake) (*Channel, *[]Event) {
 	t.Helper()
+	return setupIn(t, f, t.TempDir())
+}
+
+// setupIn is setup keeping push counts in dir, which a test shares between
+// channels to stand for restarts of one puppet's sock-mcp.
+func setupIn(t *testing.T, f *fake, dir string) (*Channel, *[]Event) {
+	t.Helper()
+	counts, err := OpenCounts(dir, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	mux := http.NewServeMux()
 	p, h := sockv1connect.NewMessagingServiceHandler(f)
 	mux.Handle(p, h)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	c := sockclient.New(client.Config{URL: srv.URL, Token: "sock_pt_t"}, "test")
-	var mu sync.Mutex
-	var got []Event
+	var got []Event // guarded by f.mu
 	ch := &Channel{
-		Client: c, Allow: map[string]bool{owner: true}, Log: slog.New(slog.DiscardHandler),
+		Client: c, Allow: map[string]bool{owner: true}, Log: slog.New(slog.DiscardHandler), Counts: counts,
 		Sleep:  func(context.Context, time.Duration) error { return nil },
 		Jitter: func(d time.Duration) time.Duration { return d },
 		Push: func(_ context.Context, ev Event) error {
-			mu.Lock()
+			f.mu.Lock()
 			got = append(got, ev)
-			mu.Unlock()
-			f.log("push:" + ev.Meta["message_id"])
+			f.events = append(f.events, "push:"+ev.Meta["message_id"])
+			f.mu.Unlock()
 			return nil
 		},
+		Shown: func(conv, id string) { f.log("shown:" + conv + "/" + id) },
 	}
 	return ch, &got
 }
@@ -124,6 +139,21 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
+func pushes(got *[]Event, f *fake) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(*got)
+}
+
+func noAcks(t *testing.T, f *fake) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.acked) != 0 {
+		t.Fatalf("acked %v; only a tool call the model makes acks", f.acked)
+	}
+}
+
 func run(ch *Channel) (cancel func(), done chan error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done = make(chan error, 1)
@@ -131,12 +161,12 @@ func run(ch *Channel) (cancel func(), done chan error) {
 	return cancel, done
 }
 
-func TestPushesAllowedSenderThenAcks(t *testing.T) {
+func TestPushesAllowedSenderAndRecordsItShown(t *testing.T) {
 	f := &fake{scripts: []script{sendAll(msg("m1", owner, "deploy it"))}}
 	ch, got := setup(t, f)
 	cancel, done := run(ch)
 	defer func() { cancel(); <-done }()
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.acked) == 1 })
+	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.events) == 2 })
 	ev := (*got)[0]
 	want := map[string]string{"conversation_id": "c1", "message_id": "m1", "sender_id": owner, "seq": "7", "sent_at": "2026-10-11T12:00:00Z"}
 	if ev.Content != "deploy it" {
@@ -149,8 +179,8 @@ func TestPushesAllowedSenderThenAcks(t *testing.T) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.events) != 2 || f.events[0] != "push:m1" || f.events[1] != "ack:m1" {
-		t.Fatalf("order = %v, want push then ack", f.events)
+	if len(f.events) != 2 || f.events[0] != "push:m1" || f.events[1] != "shown:c1/m1" {
+		t.Fatalf("order = %v, want push then shown, no ack", f.events)
 	}
 }
 
@@ -159,13 +189,12 @@ func TestDropsStrangersUnacked(t *testing.T) {
 	ch, got := setup(t, f)
 	cancel, done := run(ch)
 	defer func() { cancel(); <-done }()
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.acked) == 1 })
+	waitFor(t, func() bool { return pushes(got, f) == 1 })
+	time.Sleep(50 * time.Millisecond)
 	if len(*got) != 1 || (*got)[0].Meta["message_id"] != "m2" {
 		t.Fatalf("pushed %v", *got)
 	}
-	if f.acked[0] != "m2" {
-		t.Fatalf("acked %v; the stranger's message must stay pending", f.acked)
-	}
+	noAcks(t, f)
 }
 
 func TestGatesOnSenderNotConversation(t *testing.T) {
@@ -174,7 +203,7 @@ func TestGatesOnSenderNotConversation(t *testing.T) {
 	ch, got := setup(t, f)
 	cancel, done := run(ch)
 	defer func() { cancel(); <-done }()
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.acked) == 1 })
+	waitFor(t, func() bool { return pushes(got, f) == 1 })
 	time.Sleep(50 * time.Millisecond)
 	if len(*got) != 1 {
 		t.Fatalf("pushed %d, want 1", len(*got))
@@ -188,7 +217,8 @@ func TestReconnectDoesNotRepush(t *testing.T) {
 	ch, got := setup(t, f)
 	cancel, done := run(ch)
 	defer func() { cancel(); <-done }()
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.acked) == 2 })
+	waitFor(t, func() bool { return pushes(got, f) == 2 })
+	time.Sleep(50 * time.Millisecond)
 	if len(*got) != 2 || (*got)[0].Meta["message_id"] != "m1" || (*got)[1].Meta["message_id"] != "m2" {
 		t.Fatalf("pushed %v", *got)
 	}
@@ -204,10 +234,7 @@ func TestSilentStreamReconnects(t *testing.T) {
 	ch.Idle = 50 * time.Millisecond
 	cancel, done := run(ch)
 	defer func() { cancel(); <-done }()
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.acked) == 1 })
-	if len(*got) != 1 {
-		t.Fatalf("pushed %v", *got)
-	}
+	waitFor(t, func() bool { return pushes(got, f) == 1 })
 }
 
 func TestRejectedTokenStopsAndSaysSo(t *testing.T) {
@@ -241,7 +268,7 @@ func TestTransientErrorBacksOff(t *testing.T) {
 		return connect.NewError(connect.CodeUnavailable, nil)
 	}
 	f := &fake{scripts: []script{fail, fail, sendAll(msg("m1", owner, "x"))}}
-	ch, _ := setup(t, f)
+	ch, got := setup(t, f)
 	var mu sync.Mutex
 	var waits []time.Duration
 	ch.Sleep = func(_ context.Context, d time.Duration) error {
@@ -252,7 +279,7 @@ func TestTransientErrorBacksOff(t *testing.T) {
 	}
 	cancel, done := run(ch)
 	defer func() { cancel(); <-done }()
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.acked) == 1 })
+	waitFor(t, func() bool { return pushes(got, f) == 1 })
 	mu.Lock()
 	defer mu.Unlock()
 	if len(waits) < 2 || waits[0] != time.Second || waits[1] != 2*time.Second {
@@ -320,7 +347,7 @@ func TestSkipsReadMarkersAndUnknownEventsOnTheSameStream(t *testing.T) {
 	ch.Allow[""] = true
 	cancel, done := run(ch)
 	defer func() { cancel(); <-done }()
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.acked) == 1 })
+	waitFor(t, func() bool { return pushes(got, f) == 1 })
 	select {
 	case err := <-done:
 		t.Fatalf("Run returned %v", err)
@@ -328,7 +355,160 @@ func TestSkipsReadMarkersAndUnknownEventsOnTheSameStream(t *testing.T) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(*got) != 1 || (*got)[0].Content != "after" || f.conns != 1 || len(f.events) != 2 || f.events[0] != "push:m1" || f.events[1] != "ack:m1" {
+	if len(*got) != 1 || (*got)[0].Content != "after" || f.conns != 1 || len(f.events) != 2 || f.events[0] != "push:m1" || f.events[1] != "shown:c1/m1" {
 		t.Fatalf("pushed %v, events %v, conns %d", *got, f.events, f.conns)
+	}
+}
+
+// A host that loads no channel drops the notification silently, and the write
+// is all sock-mcp sees, so a push alone must never ack: the delivery stays
+// queued for a session that shows it, or for sock_fetch.
+func TestPushedButUnactedStaysUnacked(t *testing.T) {
+	f := &fake{scripts: []script{sendAll(msg("m1", owner, "did you see this?"))}}
+	ch, got := setup(t, f)
+	cancel, done := run(ch)
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.events) >= 1 })
+	time.Sleep(100 * time.Millisecond)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(*got) != 1 || len(f.acked) != 0 {
+		t.Fatalf("pushed %d, acked %v; a push must not ack", len(*got), f.acked)
+	}
+}
+
+// A session that never acts (a host without channels) gets each delivery at
+// most MaxPushes times across restarts of sock-mcp; after that it stays
+// pending, for sock_fetch, and is never acked.
+func TestPushesStopAfterFiveAcrossRestarts(t *testing.T) {
+	dir := t.TempDir()
+	f := &fake{}
+	total := 0
+	for range MaxPushes + 2 {
+		f.mu.Lock()
+		f.scripts, f.conns = []script{sendAll(msg("m1", owner, "still there?"))}, 0
+		f.mu.Unlock()
+		ch, got := setupIn(t, f, dir)
+		cancel, done := run(ch)
+		waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.conns >= 2 }) // the scripted stream ended
+		cancel()
+		<-done
+		total += pushes(got, f)
+	}
+	if total != MaxPushes {
+		t.Fatalf("pushed %d times over %d restarts, want %d", total, MaxPushes+2, MaxPushes)
+	}
+	noAcks(t, f)
+}
+
+// A count that cannot be read could be a restart loop's: fail safe, as if
+// the message had been pushed MaxPushes times.
+func TestUnreadableCountPushesNothing(t *testing.T) {
+	dir := t.TempDir()
+	c, err := OpenCounts(dir, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.path("m1"), []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fake{scripts: []script{sendAll(msg("m1", owner, "a"), msg("m2", owner, "b"))}}
+	ch, got := setupIn(t, f, dir)
+	cancel, done := run(ch)
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { return pushes(got, f) == 1 })
+	time.Sleep(50 * time.Millisecond)
+	if (*got)[0].Meta["message_id"] != "m2" || pushes(got, f) != 1 {
+		t.Fatalf("pushed %v, want only m2", *got)
+	}
+	noAcks(t, f)
+}
+
+// A count that cannot be written is not pushed either: an unrecorded push
+// is one a restart loop could repeat without bound.
+func TestUnwritableCountPushesNothing(t *testing.T) {
+	dir := t.TempDir()
+	c, err := OpenCounts(dir, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if c.Take("m1") {
+		t.Fatal("Take pushed what it could not record")
+	}
+}
+
+func TestPushFailureEndsRunUnacked(t *testing.T) {
+	f := &fake{scripts: []script{sendAll(msg("m1", owner, "a"))}}
+	ch, _ := setup(t, f)
+	ch.Push = func(context.Context, Event) error { return errors.New("broken pipe") }
+	_, done := run(ch)
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "broken pipe") {
+			t.Fatalf("Run = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run kept going after the transport broke")
+	}
+	noAcks(t, f)
+}
+
+func TestCountsArePrivateAndForgotten(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "pushes", "acc")
+	c, err := OpenCounts(dir, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// any id, even one no file name could carry, gets its own count
+	for _, id := range []string{"m1", "../../etc/passwd", "", "a/b\x00"} {
+		if !c.Take(id) {
+			t.Fatalf("first Take(%q) refused", id)
+		}
+	}
+	st, err := os.Stat(dir)
+	if err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("dir mode %v (%v), want 0700", st.Mode().Perm(), err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil || len(ents) != 4 {
+		t.Fatalf("entries %v (%v), want 4 files in the dir itself", ents, err)
+	}
+	for _, e := range ents {
+		info, err := e.Info()
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode %v (%v), want 0600", e.Name(), info.Mode().Perm(), err)
+		}
+	}
+	c.Forget("m1", "../../etc/passwd")
+	if ents, _ := os.ReadDir(dir); len(ents) != 2 {
+		t.Fatalf("after Forget %d entries, want 2", len(ents))
+	}
+}
+
+// Counts older than the hub keeps a message are of messages it has swept.
+func TestOpenPrunesCountsPastTheHubsRetention(t *testing.T) {
+	dir := t.TempDir()
+	c, err := OpenCounts(dir, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Take("old")
+	c.Take("new")
+	old := time.Now().Add(-countTTL - time.Hour)
+	if err := os.Chtimes(c.path("old"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenCounts(dir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(c.path("old")); !os.IsNotExist(err) {
+		t.Fatalf("old count kept: %v", err)
+	}
+	if _, err := os.Stat(c.path("new")); err != nil {
+		t.Fatalf("new count pruned: %v", err)
 	}
 }

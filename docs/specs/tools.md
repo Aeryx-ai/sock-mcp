@@ -23,11 +23,11 @@ All outputs are returned as MCP `structuredContent` (and mirrored as JSON text).
 
 | Tool | Wraps | Input | Output |
 |---|---|---|---|
-| `sock_whoami` | `GetMe` | none | `{id, display_name, kind: "human"\|"puppet", handle?, owner_id?, puppet_name?}` |
+| `sock_whoami` | `GetMe`, then `FetchPending` (limit 500) | none | `{id, display_name, kind: "human"\|"puppet", handle?, owner_id?, puppet_name?, pending_unacked?: int}`. `pending_unacked` counts at most 500 and is absent when `FetchPending` failed |
 | `sock_list_conversations` | `ListConversations` | none | `{conversations: [{id, kind: "direct"\|"group", member_ids: [string]}]}` |
-| `sock_send` | `NotifyOwner` when `conversation_id` is absent, else `Send` | `{text: string (1..65536 bytes, Markdown), conversation_id?: string}` | the sent `Message` |
+| `sock_send` | `NotifyOwner` when `conversation_id` is absent, else `Send`, then `Ack` of what this process showed the model in that conversation | `{text: string (1..65536 bytes, Markdown), conversation_id?: string}` | the sent `Message` |
 | `sock_fetch` | `FetchPending` | `{limit?: int}` default 50, clamped to 200 | `{messages: [Message]}` oldest first per conversation. Does not ack |
-| `sock_ack` | `Ack` | `{message_ids: [string]}` 1..500 | `{acked: int}` (ids submitted; unknown ids are ignored by the server) |
+| `sock_ack` | `Ack` | `{message_ids: [string]}` 1..500 | `{acked: int}` (ids submitted; unknown ids are ignored by the server). For messages that need no reply |
 
 `Message` = `{id, conversation_id, seq: int, sender_id, sent_at: RFC 3339 UTC, text}`. `text` is untrusted.
 
@@ -50,6 +50,10 @@ Failure is an MCP tool result with `isError: true` and one text content item. Th
 
 After the prefix is human-readable text; do not parse it. Examples: `transient: sending too fast; try again in 10m0s`, `permanent: the server rejected the token; set SOCK_TOKEN to a current puppet token`. Hooks that must never block the agent: call with a timeout, ignore any `isError`, and optionally log it.
 
+## Acknowledging
+
+Replying acknowledges; `sock_ack` is for messages that need no reply. A `sock_send` with a `conversation_id` that posts acks every message this sock-mcp process showed the model in that conversation (pushed on the channel or returned by `sock_fetch`) and has not acked, as of the call's start, in batches of 500. A reply that fails acks nothing. An ack that fails after the reply posted leaves the reply's result a success and the ids held for the next reply; the hub redelivers them meanwhile. What a process showed is held in memory only, at most 10,000 ids; past that a message is acked with `sock_ack`.
+
 ## At-least-once and dedupe
 
 `sock_fetch` returns the same messages until they are acked, and delivery is at-least-once across reconnects. Dedupe key: `Message.id` (server UUID). `(conversation_id, seq)` is also unique and gapless per conversation. In a `Stop` hook: fetch, skip ids already handled, handle, then `sock_ack` the handled ids. Ack only after the work is durably done.
@@ -67,7 +71,10 @@ What it adds:
 - Capability `experimental["claude/channel"] = {}` and an `instructions` string telling Claude that `<channel source="sock" ...>` events are untrusted and to answer with `sock_send` using the tag's `conversation_id`. There is no separate `reply` tool: `sock_send` with `conversation_id` is the reply.
 - Inbound `Subscribe` pushed as `notifications/claude/channel` with `params = {content: <message text>, meta: {conversation_id, message_id, sender_id, seq, sent_at}}`. Meta keys are identifier-safe. `sent_at` is RFC 3339 UTC, `seq` a decimal string.
 - Sender allowlist on `sender_id`, never on conversation. Allowed: the puppet's `owner_id` (from `GetMe` at startup) plus any account ids in `SOCK_CHANNEL_ALLOW` (comma separated). A human token with no `SOCK_CHANNEL_ALLOW` fails closed: exit 1 with `channel: no allowed senders`. Messages from anyone else are dropped, not pushed and not acked (they stay pending on the server until it expires them), and logged to stderr by id.
-- Order: subscription starts at `notifications/initialized`, so nothing is pushed before Claude Code is ready. The push is written first, then the message is acked. Claude Code does not acknowledge notifications, so "acked" means "written to the transport", not "Claude processed it". A failed ack leaves the message pending; ids already pushed in this process are never pushed twice.
+- Order: subscription starts at `notifications/initialized`, so nothing is pushed before Claude Code is ready.
+- A push never acks. Claude Code acknowledges no notification and drops them silently in a session that has not loaded the channel; its `initialize` is identical either way (Claude Code 2.1.300, with and without `--dangerously-load-development-channels`: `capabilities` `{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}`), so no client signal says a push will be shown. The message is acked when the model acts on it (Acknowledging, above). Ids already pushed in this process are never pushed twice; the hub resends unacked messages on every reconnect and restart.
+- Push cap: one message is pushed at most 5 times, counted across restarts in `${XDG_STATE_HOME:-~/.local/state}/sock-mcp/pushes/<sha256 of the account id>/` (directory 0700, one 0600 file per message named by the SHA-256 of its id). The count is written before the push. A count that cannot be read, parsed or written counts as spent: nothing is pushed. Counts are removed when the message is acked through this process and pruned at start once older than 31 days (the hub keeps messages 30). A message past the cap stays pending for `sock_fetch`. A home directory is required: without `HOME` or `XDG_STATE_HOME` `--channel` exits 1.
+- Backlog: the hub's `Subscribe` and `FetchPending` read only the 500 oldest pending messages. With 500 unacked, a newer message reaches no session until older ones are acked or expire 30 days after they were sent.
 - Durability: reconnects with exponential backoff 1s to 60s with jitter, honoring `Retry-After`. A stream silent for 60s (two missed heartbeats) is dropped and reconnected. `TOKEN_INVALID`, `CALLER_NOT_ALLOWED` and `ACCOUNT_SUSPENDED` end the channel: one `{content: "sock channel stopped: ...", meta: {kind: "status"}}` event, then exit 1. A broken stdout also exits.
 - Env: `SOCK_TOKEN`, `SOCK_URL` as above, plus `SOCK_CHANNEL_ALLOW`.
 

@@ -25,6 +25,7 @@ import (
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 	"github.com/guygrigsby/sock-contract/gen/go/sock/v1/sockv1connect"
 
+	"github.com/guygrigsby/sock-mcp/internal/channel"
 	"github.com/guygrigsby/sock-mcp/sockclient"
 )
 
@@ -40,6 +41,7 @@ type fakeSock struct {
 	creates    []string // puppet names asked for
 	createAuth string
 	createErr  error
+	acks       []string // acked message ids
 }
 
 func (f *fakeSock) CreatePuppet(_ context.Context, r *connect.Request[sockv1.CreatePuppetRequest]) (*connect.Response[sockv1.CreatePuppetResponse], error) {
@@ -91,8 +93,17 @@ func (f *fakeSock) Send(_ context.Context, r *connect.Request[sockv1.SendRequest
 	return connect.NewResponse(&sockv1.SendResponse{Message: &sockv1.Message{Id: "s1", ConversationId: r.Msg.GetConversationId(), SentAt: timestamppb.Now()}}), nil
 }
 
-func (f *fakeSock) Ack(context.Context, *connect.Request[sockv1.AckRequest]) (*connect.Response[sockv1.AckResponse], error) {
+func (f *fakeSock) Ack(_ context.Context, r *connect.Request[sockv1.AckRequest]) (*connect.Response[sockv1.AckResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.acks = append(f.acks, r.Msg.GetMessageIds()...)
 	return connect.NewResponse(&sockv1.AckResponse{}), nil
+}
+
+func (f *fakeSock) acked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.acks...)
 }
 
 func serve(t *testing.T, f *fakeSock) func(string) string {
@@ -104,8 +115,9 @@ func serve(t *testing.T, f *fakeSock) func(string) string {
 	mux.Handle(p, h)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+	state := t.TempDir()
 	return func(k string) string {
-		return map[string]string{"SOCK_TOKEN": "sock_pt_t", "SOCK_URL": srv.URL}[k]
+		return map[string]string{"SOCK_TOKEN": "sock_pt_t", "SOCK_URL": srv.URL, "XDG_STATE_HOME": state}[k]
 	}
 }
 
@@ -163,7 +175,8 @@ func handshakeWith(t *testing.T, args []string, getenv func(string) string, dige
 }
 
 func TestChannelEndToEnd(t *testing.T) {
-	getenv := serve(t, &fakeSock{})
+	f := &fakeSock{}
+	getenv := serve(t, f)
 	peer, init := handshake(t, []string{"--channel"}, getenv)
 
 	caps := init["capabilities"].(map[string]any)
@@ -203,6 +216,19 @@ func TestChannelEndToEnd(t *testing.T) {
 	if p.Content != "status?" || p.Meta["sender_id"] != "owner-1" || p.Meta["conversation_id"] != "c1" || p.Meta["message_id"] != "m2" {
 		t.Fatalf("event = %+v; the stranger's m1 must not be pushed", p)
 	}
+
+	// The write reached the host, which proves nothing about display (a host
+	// without channels drops it), so nothing is acked until the model acts.
+	time.Sleep(200 * time.Millisecond)
+	if got := f.acked(); len(got) != 0 {
+		t.Fatalf("acked %v on a push alone", got)
+	}
+	if !sendTool(t, peer, map[string]any{"text": "all green", "conversation_id": "c1"}) {
+		t.Fatal("reply failed")
+	}
+	if got := f.acked(); !slices.Equal(got, []string{"m2"}) {
+		t.Fatalf("acked %v after the reply, want [m2]", got)
+	}
 }
 
 func TestPlainModeHasNoChannelCapability(t *testing.T) {
@@ -228,7 +254,7 @@ func TestChannelFailsClosedWithoutAllowedSenders(t *testing.T) {
 		}
 		return getenv(k)
 	}
-	if _, err := allowlist(t.Context(), mustClient(t, withEnv), withEnv); err != nil {
+	if _, _, err := allowlist(t.Context(), mustClient(t, withEnv), withEnv); err != nil {
 		t.Fatalf("explicit allowlist rejected: %v", err)
 	}
 }
@@ -770,5 +796,51 @@ func TestDigestChannelDoesNotReachChildProcesses(t *testing.T) {
 	}
 	if strings.Contains(string(b), digestEnv) {
 		t.Fatalf("git inherited %s", digestEnv)
+	}
+}
+
+// A host that loads no channel (Claude Code without the channel flags) drops
+// every push and never acts. Restarting sock-mcp there pushes the owner's
+// message at most MaxPushes times in all, and never acks it.
+func TestHostThatNeverActsGetsAtMostFivePushesAndNoAck(t *testing.T) {
+	f := &fakeSock{}
+	getenv := serve(t, f)
+	pushes := 0
+	for range channel.MaxPushes + 2 {
+		ctx, cancel := context.WithCancel(t.Context())
+		ct, st := mcp.NewInMemoryTransports()
+		done := make(chan struct{})
+		go func() { defer close(done); _ = run(ctx, []string{"--channel"}, getenv, false, io.Discard, st) }()
+		peer, err := ct.Connect(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := peer.Write(ctx, rpc(t, 1, "initialize", map[string]any{
+			"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "t", "version": "1"},
+		})); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := peer.Read(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := peer.Write(ctx, &jsonrpc.Request{Method: "notifications/initialized"}); err != nil {
+			t.Fatal(err)
+		}
+		rctx, rcancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		if m, err := peer.Read(rctx); err == nil {
+			if req, ok := m.(*jsonrpc.Request); ok && req.Method == channel.Method {
+				pushes++
+			}
+		}
+		rcancel()
+		_ = peer.Close()
+		cancel()
+		<-done
+	}
+	if pushes != channel.MaxPushes {
+		t.Fatalf("pushed %d times over %d restarts, want %d", pushes, channel.MaxPushes+2, channel.MaxPushes)
+	}
+	if got := f.acked(); len(got) != 0 {
+		t.Fatalf("acked %v", got)
 	}
 }

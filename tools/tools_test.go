@@ -2,6 +2,7 @@ package tools_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,6 +40,8 @@ type fake struct {
 	fetchLimit int32
 	pending    []*sockv1.Message
 	meErr      error
+	fetchErr   error
+	ackErr     error
 }
 
 func (f *fake) GetMe(context.Context, *connect.Request[sockv1.GetMeRequest]) (*connect.Response[sockv1.GetMeResponse], error) {
@@ -120,6 +123,9 @@ func (f *fake) FetchPending(_ context.Context, r *connect.Request[sockv1.FetchPe
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fetchLimit = r.Msg.GetLimit()
+	if f.fetchErr != nil {
+		return nil, f.fetchErr
+	}
 	return connect.NewResponse(&sockv1.FetchPendingResponse{Messages: f.pending}), nil
 }
 
@@ -127,6 +133,9 @@ func (f *fake) Ack(_ context.Context, r *connect.Request[sockv1.AckRequest]) (*c
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acked = append(f.acked, r.Msg.GetMessageIds())
+	if f.ackErr != nil {
+		return nil, f.ackErr
+	}
 	return connect.NewResponse(&sockv1.AckResponse{}), nil
 }
 
@@ -245,7 +254,7 @@ func TestWhoamiSendsTokenAndUserAgent(t *testing.T) {
 	if out["kind"] != "puppet" || out["owner_id"] != "owner-1" || out["id"] != "acc-1" {
 		t.Fatalf("whoami = %v", out)
 	}
-	if len(f.auth) != 1 || f.auth[0] != "Bearer "+token+"|sock-mcp/test" {
+	if len(f.auth) == 0 || f.auth[0] != "Bearer "+token+"|sock-mcp/test" {
 		t.Fatalf("auth = %v", f.auth)
 	}
 }
@@ -433,5 +442,141 @@ func TestSendRateLimitedIsTransientWithTheWait(t *testing.T) {
 				t.Fatalf("hub saw %d calls, want 1", n)
 			}
 		})
+	}
+}
+
+// shownIn starts the tools with a ledger that the channel told of pushes:
+// m1 and m2 in c1, m3 in c2. forgot collects what the ledger hands back once
+// acked.
+func shownIn(t *testing.T, f *fake) (*mcp.ClientSession, *[]string) {
+	t.Helper()
+	var forgot []string
+	l := &tools.Ledger{Forget: func(ids ...string) { forgot = append(forgot, ids...) }}
+	l.Record("c1", "m1")
+	l.Record("c1", "m2")
+	l.Record("c2", "m3")
+	return startWith(t, f, tools.Policy{Ledger: l}), &forgot
+}
+
+func ackedIDs(f *fake) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, b := range f.acked {
+		out = append(out, b...)
+	}
+	return sortedCopy(out)
+}
+
+// Replying is acting on what the model was shown in that conversation: the
+// reply acks those deliveries, after the reply is posted, and no others.
+func TestReplyAcksWhatWasShownInThatConversation(t *testing.T) {
+	f := &fake{}
+	cs, forgot := shownIn(t, f)
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1"}))
+	if got := ackedIDs(f); strings.Join(got, ",") != "m1,m2" {
+		t.Fatalf("acked %v, want m1,m2", got)
+	}
+	if strings.Join(sortedCopy(*forgot), ",") != "m1,m2" {
+		t.Fatalf("forgot %v", *forgot)
+	}
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "again", "conversation_id": "c1"}))
+	if got := ackedIDs(f); len(got) != 2 {
+		t.Fatalf("second reply acked again: %v", got)
+	}
+}
+
+// A reply that did not post acks nothing: the model has not answered.
+func TestFailedReplyAcksNothing(t *testing.T) {
+	e := connect.NewError(connect.CodePermissionDenied, nil)
+	f := &fake{sendErr: e}
+	cs, _ := shownIn(t, f)
+	if res := call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1"}); !res.IsError {
+		t.Fatal("want isError")
+	}
+	if got := ackedIDs(f); len(got) != 0 {
+		t.Fatalf("acked %v after a failed reply", got)
+	}
+}
+
+// A failed ack after a posted reply keeps the reply's success and the ids, so
+// the next reply in that conversation acks them.
+func TestReplyAckFailureRetriesOnTheNextReply(t *testing.T) {
+	f := &fake{ackErr: connect.NewError(connect.CodePermissionDenied, nil)}
+	cs, forgot := shownIn(t, f)
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1"}))
+	if len(*forgot) != 0 {
+		t.Fatalf("forgot %v on a failed ack", *forgot)
+	}
+	f.mu.Lock()
+	f.ackErr = nil
+	f.mu.Unlock()
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "again", "conversation_id": "c1"}))
+	if strings.Join(sortedCopy(*forgot), ",") != "m1,m2" {
+		t.Fatalf("forgot %v", *forgot)
+	}
+}
+
+// What sock_fetch returned was shown to the model too.
+func TestReplyAcksWhatFetchShowed(t *testing.T) {
+	f := &fake{pending: []*sockv1.Message{msg("x")}}
+	cs := start(t, f)
+	structured(t, call(t, cs, "sock_fetch", nil))
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1"}))
+	if got := ackedIDs(f); strings.Join(got, ",") != "m1" {
+		t.Fatalf("acked %v, want m1", got)
+	}
+}
+
+func TestAckForgetsTheIDs(t *testing.T) {
+	f := &fake{}
+	cs, forgot := shownIn(t, f)
+	structured(t, call(t, cs, "sock_ack", map[string]any{"message_ids": []string{"m3"}}))
+	if strings.Join(*forgot, ",") != "m3" {
+		t.Fatalf("forgot %v", *forgot)
+	}
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "x", "conversation_id": "c2"}))
+	if got := ackedIDs(f); strings.Join(got, ",") != "m3" {
+		t.Fatalf("acked %v; m3 was acked already and must not be again", got)
+	}
+}
+
+func TestToolsSayReplyingAcks(t *testing.T) {
+	res, err := start(t, &fake{}).ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		if (tool.Name == "sock_ack" || tool.Name == "sock_send") && !strings.Contains(tool.Description, "acknowledges") {
+			t.Errorf("%s description does not say a reply acknowledges: %q", tool.Name, tool.Description)
+		}
+	}
+}
+
+func TestWhoamiCountsPending(t *testing.T) {
+	f := &fake{pending: []*sockv1.Message{msg("a"), msg("b")}}
+	out := structured(t, call(t, start(t, f), "sock_whoami", nil))
+	if out["pending_unacked"] != float64(2) || f.fetchLimit != 500 {
+		t.Fatalf("whoami = %v, fetch limit %d", out, f.fetchLimit)
+	}
+	f = &fake{fetchErr: connect.NewError(connect.CodePermissionDenied, nil)}
+	out = structured(t, call(t, start(t, f), "sock_whoami", nil))
+	if _, ok := out["pending_unacked"]; ok || out["id"] != "acc-1" {
+		t.Fatalf("whoami = %v, want the account without a count", out)
+	}
+}
+
+// The hub takes at most 500 ids per Ack.
+func TestReplyAcksInBatchesTheHubTakes(t *testing.T) {
+	f := &fake{}
+	l := &tools.Ledger{}
+	for i := range 1201 {
+		l.Record("c1", fmt.Sprint("m", i))
+	}
+	structured(t, call(t, startWith(t, f, tools.Policy{Ledger: l}), "sock_send", map[string]any{"text": "x", "conversation_id": "c1"}))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.acked) != 3 || len(f.acked[0]) != 500 || len(f.acked[2]) != 201 {
+		t.Fatalf("ack batches %d", len(f.acked))
 	}
 }

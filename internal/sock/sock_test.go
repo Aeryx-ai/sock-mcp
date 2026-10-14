@@ -91,7 +91,7 @@ func withEnv(base func(string) string, extra map[string]string) func(string) str
 }
 
 func TestLoadConfigFallsBackToTheCLIFile(t *testing.T) {
-	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\ntoken = \"sock_pt_file\"\naccess_gate = \"gate-f\"\n")
+	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\npuppet_token = \"sock_pt_file\"\naccess_gate = \"gate-f\"\n")
 	c, err := LoadConfig(g, nil)
 	if err != nil || c.Token != "sock_pt_file" || c.URL != "https://file.example" || c.AccessGate != "gate-f" {
 		t.Fatalf("got %+v, %v", c, err)
@@ -99,7 +99,7 @@ func TestLoadConfigFallsBackToTheCLIFile(t *testing.T) {
 }
 
 func TestLoadConfigFileWithoutURLUsesTheDefault(t *testing.T) {
-	g := writeCLIConfig(t, 0o600, "token = \"sock_pt_file\"\n")
+	g := writeCLIConfig(t, 0o600, "puppet_token = \"sock_pt_file\"\n")
 	if c, err := LoadConfig(g, nil); err != nil || c.URL != client.DefaultURL {
 		t.Fatalf("got %+v, %v", c, err)
 	}
@@ -107,7 +107,7 @@ func TestLoadConfigFileWithoutURLUsesTheDefault(t *testing.T) {
 
 // the token and the URL it is sent to come from one source
 func TestLoadConfigEnvTokenIgnoresTheFile(t *testing.T) {
-	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\ntoken = \"sock_pt_file\"\naccess_gate = \"gate-f\"\n")
+	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\npuppet_token = \"sock_pt_file\"\naccess_gate = \"gate-f\"\n")
 	c, err := LoadConfig(withEnv(g, map[string]string{"SOCK_TOKEN": "sock_pt_env"}), nil)
 	if err != nil || c.Token != "sock_pt_env" || c.URL != client.DefaultURL || c.AccessGate != "" {
 		t.Fatalf("got %+v, %v: the file's url or gate leaked into an env token", c, err)
@@ -115,7 +115,7 @@ func TestLoadConfigEnvTokenIgnoresTheFile(t *testing.T) {
 }
 
 func TestLoadConfigFileTokenNeverGoesToAnAmbientURL(t *testing.T) {
-	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\ntoken = \"sock_pt_file\"\naccess_gate = \"gate-f\"\n")
+	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\npuppet_token = \"sock_pt_file\"\naccess_gate = \"gate-f\"\n")
 	var logged []string
 	logf := func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
 	c, err := LoadConfig(withEnv(g, map[string]string{"SOCK_URL": "https://evil.example", "SOCK_ACCESS_GATE": "gate-env"}), logf)
@@ -128,7 +128,7 @@ func TestLoadConfigFileTokenNeverGoesToAnAmbientURL(t *testing.T) {
 }
 
 func TestLoadConfigRefusesAReadableFileWithAToken(t *testing.T) {
-	g := writeCLIConfig(t, 0o644, "token = \"sock_pt_file\"\n")
+	g := writeCLIConfig(t, 0o644, "puppet_token = \"sock_pt_file\"\n")
 	if _, err := LoadConfig(g, nil); err == nil || !strings.Contains(err.Error(), "chmod 600") {
 		t.Fatalf("err = %v", err)
 	}
@@ -138,6 +138,23 @@ func TestLoadConfigNoTokenAnywhereKeepsTheOldError(t *testing.T) {
 	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\n")
 	_, err := LoadConfig(g, nil)
 	if err == nil || !strings.Contains(err.Error(), "no token: set SOCK_TOKEN") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// sock login writes a human token to `token`; sock-mcp needs a puppet's
+func TestLoadConfigIgnoresTheHumanTokenInTheFile(t *testing.T) {
+	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\ntoken = \"sock_st_human_secret\"\n")
+	_, err := LoadConfig(g, nil)
+	if err == nil || !strings.Contains(err.Error(), "no token") || strings.Contains(err.Error(), "sock_st_human_secret") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLoadConfigRefusesAHumanTokenInPuppetToken(t *testing.T) {
+	g := writeCLIConfig(t, 0o600, "puppet_token = \"sock_st_human_secret\"\n")
+	_, err := LoadConfig(g, nil)
+	if err == nil || !strings.Contains(err.Error(), "puppet_token") || !strings.Contains(err.Error(), "sock puppets use") || strings.Contains(err.Error(), "sock_st_human_secret") {
 		t.Fatalf("err = %v", err)
 	}
 }

@@ -62,16 +62,21 @@ func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) s
 			return cfg, fmt.Errorf("project puppet: %w", err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
 	projects := &client.Projects{
 		API:  client.NewPuppetAPI(client.New(cfg, "sock-mcp/"+version), client.DefaultRetrier()),
 		Dir:  client.DefaultProjectsDir(getenv),
 		Host: client.ShortHost(),
 		Log:  func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, "sock-mcp: "+f+"\n", a...) },
 	}
-	projects.Sweep(ctx)
-	tok, err := projects.Ensure(ctx, dir)
+	// a cached token the hub rejects (the puppet was erased) is replaced
+	projects.Check = client.NewTokenCheck(cfg, "sock-mcp/"+version)
+	// separate budgets: a slow sweep must not leave Ensure without time
+	sweepCtx, cancelSweep := context.WithTimeout(ctx, 20*time.Second)
+	projects.Sweep(sweepCtx)
+	cancelSweep()
+	ensureCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	tok, err := projects.Ensure(ensureCtx, dir)
 	if err != nil {
 		return cfg, errors.New(strings.ReplaceAll(err.Error(), cfg.Token, "[redacted]"))
 	}

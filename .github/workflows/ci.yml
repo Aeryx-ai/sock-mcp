@@ -13,20 +13,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: mcp
-      # ADR 1: build against a tagged contract. Bump this tag deliberately,
-      # in the same change that starts using what the new tag adds.
+      # ADR 1: build against tagged sock-contract and sock-client. The tags
+      # live in mcp/.contract-ref and mcp/.client-ref, which make check also
+      # builds against; bump them deliberately, in the change that starts
+      # using what the new tag adds.
+      - id: pins
+        run: |
+          echo "contract=$(cat mcp/.contract-ref)" >> "$GITHUB_OUTPUT"
+          echo "client=$(cat mcp/.client-ref)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: guygrigsby/sock-contract
-          ref: v0.6.10
+          ref: ${{ steps.pins.outputs.contract }}
           path: contract
           ssh-key: ${{ secrets.CONTRACT_DEPLOY_KEY }}
-      # Pinned sock-client tag (ADR 1). Bump it deliberately, in the change
-      # that starts using the new tag.
       - uses: actions/checkout@v4
         with:
           repository: guygrigsby/sock-client
-          ref: v0.1.4
+          ref: ${{ steps.pins.outputs.client }}
           path: client
           ssh-key: ${{ secrets.CLIENT_DEPLOY_KEY }}
       - uses: actions/setup-go@v5

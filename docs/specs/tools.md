@@ -31,6 +31,8 @@ All outputs are returned as MCP `structuredContent` (and mirrored as JSON text).
 
 `Message` = `{id, conversation_id, seq: int, sender_id, sent_at: RFC 3339 UTC, text}`. `text` is untrusted.
 
+`sock_send` without `conversation_id` is refused (`permanent:`, nothing sent) unless sock-mcp started with `SOCK_MCP_DIGEST_CHANNEL` exactly `1`, the owner's digest channel session ([README](../../README.md#messaging-the-owner)). With a `conversation_id` it is never refused by sock-mcp.
+
 Placeholder mapping: `notify_owner` = `sock_send` with no `conversation_id`; `send` = `sock_send` with one; `fetch_pending` = `sock_fetch`; `ack` = `sock_ack`; `list_conversations` = `sock_list_conversations`.
 
 ## Idempotency and retries

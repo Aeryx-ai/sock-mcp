@@ -8,7 +8,7 @@ Subdomain: none of its own. sock-mcp is a conformist adapter in the context map:
 
 ## Caller class
 
-Puppet device (`sock_pt_…`). Human session tokens (`sock_st_…`) are accepted so a person can drive it, but `sock_send` without `conversation_id` (NotifyOwner) needs a puppet token.
+Puppet device (`sock_pt_…`). Human session tokens (`sock_st_…`) are accepted so a person can drive it, but `sock_send` without `conversation_id` (NotifyOwner) needs a puppet token. NotifyOwner is refused outright outside the owner's digest channel session (`SOCK_MCP_DIGEST_CHANNEL=1`): background sessions never message the owner.
 
 ## Config
 

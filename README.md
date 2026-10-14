@@ -14,6 +14,14 @@ Create a puppet in the sock app, copy its token, and register the server with yo
 
 `sock_whoami`, `sock_list_conversations`, `sock_send`, `sock_fetch`, `sock_ack`. Schemas, retry, failure and dedupe rules: [docs/specs/tools.md](docs/specs/tools.md). Design: [docs/specs/design.md](docs/specs/design.md).
 
+## Messaging the owner
+
+Background sessions never message the owner. `sock_send` without `conversation_id` (NotifyOwner) is refused with a `permanent:` error and nothing reaches the hub, unless this session is the owner's digest channel. Replies, `sock_send` with a `conversation_id`, always go through.
+
+`SOCK_MCP_DIGEST_CHANNEL=1`: this session is the owner's digest channel; set only in an operator-configured session. Only exactly `1` counts. `sock-mcp` reads it once at start from its own environment and removes it, so no child process inherits it; no tool argument, message text or config file field turns it on. Set it in that one server's own `env` block, not in the agent's environment, where every session the agent starts would inherit it.
+
+No session signal stands in for it, because none is positive and unforgeable. In Claude Code 2.1.299 a stdio MCP server never sees `CLAUDE_CODE_SESSION_ATTENDED`, the hooks' signal. A plugin `.mcp.json` `env` of `${CLAUDE_CODE_SESSION_ATTENDED}` expands from Claude Code's own process environment, not the session's attended state: unset in a top-level terminal session, and `1` in a `claude -p` started from an attended session's shell, which it inherits (probed live). `CLAUDE_CODE_ENTRYPOINT=cli` is also what a background job sees. Codex passes no session signal at all. So the owner hears from a session through a reply, or through the sock plugin's hooks, which ask the owner only when a person is at the session.
+
 ## Configuration
 
 `SOCK_TOKEN`, `SOCK_URL` and `SOCK_ACCESS_GATE` from the environment. When `SOCK_TOKEN` is unset (a host such as a Codex plugin starts the server without your environment), `sock-mcp` reads the `sock` CLI's config file, `$XDG_CONFIG_HOME/sock/config.toml` or `~/.config/sock/config.toml` (mode 600): `machine_key` or `puppet_token`, `url` and `access_gate`. `sock machine-key use` writes `machine_key` (see [Machine key](#machine-key)); `sock puppets use <puppet id>` mints a puppet token and writes `puppet_token`, one puppet shared by every project. The token is the first of `SOCK_TOKEN`, then `machine_key`, then `puppet_token`. The `token` that `sock login` writes is yours and is never used here. One source, never a mix: with the token from the file, the URL and gate come from the file too and an ambient `SOCK_URL` or `SOCK_ACCESS_GATE` is ignored, so the token only goes to the URL it was saved with.

@@ -7,6 +7,7 @@ package tools
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"time"
 
 	"connectrpc.com/connect"
@@ -23,9 +24,16 @@ const (
 	fetchMax     = 200
 )
 
+// Policy is what this session's tools may do beyond replying.
+type Policy struct {
+	// NotifyOwner lets sock_send without a conversation_id message the owner.
+	// Only the owner's digest channel session sets it; the zero value refuses.
+	NotifyOwner bool
+}
+
 // Register adds every sock tool to s.
-func Register(s *mcp.Server, c *sockclient.Client) {
-	h := &handlers{c: c}
+func Register(s *mcp.Server, c *sockclient.Client, p Policy) {
+	h := &handlers{c: c, p: p}
 	registerOutbound(s, h)
 	registerInbound(s, h)
 }
@@ -33,8 +41,8 @@ func Register(s *mcp.Server, c *sockclient.Client) {
 // RegisterOutbound registers only the tools that message the owner and look
 // around: sock_whoami, sock_list_conversations and sock_send. sock_fetch and
 // sock_ack consume deliveries, which something else (sock listen) owns.
-func RegisterOutbound(s *mcp.Server, c *sockclient.Client) {
-	registerOutbound(s, &handlers{c: c})
+func RegisterOutbound(s *mcp.Server, c *sockclient.Client, p Policy) {
+	registerOutbound(s, &handlers{c: c, p: p})
 }
 
 func registerOutbound(s *mcp.Server, h *handlers) {
@@ -49,8 +57,10 @@ func registerOutbound(s *mcp.Server, h *handlers) {
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 	}, h.listConversations)
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "sock_send",
-		Description: "Send a Markdown message (1 to 65536 bytes). Without conversation_id it goes to this puppet's owner (puppet tokens only). Posts once even if the call is retried.",
+		Name: "sock_send",
+		Description: "Send a Markdown message (1 to 65536 bytes) to conversation_id, a conversation this account is in. " +
+			"Without conversation_id it would go to this puppet's owner unprompted, which only the owner's digest channel session may do; elsewhere it is refused. " +
+			"Posts once even if the call is retried.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)},
 	}, h.send)
 }
@@ -71,7 +81,10 @@ func registerInbound(s *mcp.Server, h *handlers) {
 
 func ptr[T any](v T) *T { return &v }
 
-type handlers struct{ c *sockclient.Client }
+type handlers struct {
+	c *sockclient.Client
+	p Policy
+}
 
 // Account is who an account is.
 type Account struct {
@@ -140,10 +153,19 @@ func (h *handlers) listConversations(ctx context.Context, _ *mcp.CallToolRequest
 // SendIn is the sock_send input.
 type SendIn struct {
 	Text           string `json:"text" jsonschema:"Markdown message body, 1 to 65536 bytes"`
-	ConversationID string `json:"conversation_id,omitempty" jsonschema:"conversation to post in; omit to message the owner"`
+	ConversationID string `json:"conversation_id,omitempty" jsonschema:"conversation to post in; omitting it messages the owner and is refused outside the owner's digest channel session"`
 }
 
+// errNotifyOwner is sock_send's answer to a message for the owner from a
+// session that is not the owner's digest channel.
+var errNotifyOwner = errors.New("permanent: this session may not message the owner unprompted, so nothing was sent. " +
+	"To answer the owner, reply with conversation_id set to a conversation the owner wrote in (sock_list_conversations lists them). " +
+	"To get the owner's attention, finish your turn: the sock plugin's hooks ask the owner when a person is at this session")
+
 func (h *handlers) send(ctx context.Context, _ *mcp.CallToolRequest, in SendIn) (*mcp.CallToolResult, Message, error) {
+	if in.ConversationID == "" && !h.p.NotifyOwner {
+		return nil, Message{}, errNotifyOwner
+	}
 	key := rand.Text() // one key per tool call, reused by every retry
 	m, err := sockclient.Call(ctx, h.c, func(ctx context.Context) (*sockv1.Message, error) {
 		if in.ConversationID == "" {

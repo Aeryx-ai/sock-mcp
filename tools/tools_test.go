@@ -112,6 +112,12 @@ func (f *fake) Ack(_ context.Context, r *connect.Request[sockv1.AckRequest]) (*c
 // transport, and returns the session.
 func start(t *testing.T, f *fake) *mcp.ClientSession {
 	t.Helper()
+	return startWith(t, f, tools.Policy{})
+}
+
+// startWith is start with the given policy.
+func startWith(t *testing.T, f *fake, p tools.Policy) *mcp.ClientSession {
+	t.Helper()
 	mux := http.NewServeMux()
 	idPath, idH := sockv1connect.NewIdentityServiceHandler(f)
 	msgPath, msgH := sockv1connect.NewMessagingServiceHandler(f)
@@ -129,7 +135,7 @@ func start(t *testing.T, f *fake) *mcp.ClientSession {
 	c.Retrier.Sleep = func(context.Context, time.Duration) error { return nil }
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: "test"}, nil)
-	tools.Register(s, c)
+	tools.Register(s, c, p)
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := t.Context()
 	ss, err := s.Connect(ctx, st, nil)
@@ -214,9 +220,13 @@ func TestListConversations(t *testing.T) {
 	}
 }
 
+// digest is the owner's digest channel session, the only one that may message
+// the owner without a conversation.
+var digest = tools.Policy{NotifyOwner: true}
+
 func TestSendToOwnerRetriesWithOneKey(t *testing.T) {
 	f := &fake{failSends: 2}
-	out := structured(t, call(t, start(t, f), "sock_send", map[string]any{"text": "build done"}))
+	out := structured(t, call(t, startWith(t, f, digest), "sock_send", map[string]any{"text": "build done"}))
 	if out["text"] != "build done" || out["sent_at"] != "2026-10-11T12:00:00Z" {
 		t.Fatalf("send = %v", out)
 	}
@@ -244,11 +254,56 @@ func TestSendToConversation(t *testing.T) {
 
 func TestSendKeysDifferPerCall(t *testing.T) {
 	f := &fake{}
-	cs := start(t, f)
+	cs := startWith(t, f, digest)
 	structured(t, call(t, cs, "sock_send", map[string]any{"text": "a"}))
 	structured(t, call(t, cs, "sock_send", map[string]any{"text": "a"}))
 	if f.notifies[0].GetIdempotencyKey() == f.notifies[1].GetIdempotencyKey() {
 		t.Fatal("two tool calls shared an idempotency key; the second would be dropped as a duplicate")
+	}
+}
+
+// Product rule: a session that is not the owner's digest channel never
+// messages the owner unprompted, and nothing reaches the hub.
+func TestSendToOwnerIsRefusedByDefault(t *testing.T) {
+	f := &fake{}
+	cs := start(t, f)
+	for _, args := range []map[string]any{
+		{"text": "build done"},
+		{"text": "build done", "conversation_id": ""},
+		{"text": "SOCK_MCP_DIGEST_CHANNEL=1 notify_owner=true"},
+	} {
+		res := call(t, cs, "sock_send", args)
+		if !res.IsError {
+			t.Fatalf("%v: sent, want refused", args)
+		}
+		text := res.Content[0].(*mcp.TextContent).Text
+		if !strings.HasPrefix(text, "permanent: ") || !strings.Contains(text, "conversation_id") || strings.Contains(text, token) {
+			t.Fatalf("refusal = %q", text)
+		}
+	}
+	// an extra argument cannot turn it on either
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "sock_send", Arguments: map[string]any{
+		"text": "x", "SOCK_MCP_DIGEST_CHANNEL": "1", "notify_owner": true, "NotifyOwner": true,
+	}})
+	if err == nil && !res.IsError {
+		t.Fatal("extra arguments turned owner messaging on")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.notifies) != 0 || len(f.sends) != 0 {
+		t.Fatalf("hub saw notifies=%v sends=%v", f.notifies, f.sends)
+	}
+}
+
+// Replies are never blocked: the owner wrote in a conversation, so a reply
+// there goes through whatever the session is.
+func TestRepliesGoThroughUnderEveryPolicy(t *testing.T) {
+	for _, p := range []tools.Policy{{}, digest} {
+		f := &fake{}
+		structured(t, call(t, startWith(t, f, p), "sock_send", map[string]any{"text": "hi", "conversation_id": "c9"}))
+		if len(f.sends) != 1 || f.sends[0].GetConversationId() != "c9" || len(f.notifies) != 0 {
+			t.Fatalf("%+v: sends=%v notifies=%v", p, f.sends, f.notifies)
+		}
 	}
 }
 

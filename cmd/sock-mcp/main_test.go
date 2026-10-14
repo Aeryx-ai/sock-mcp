@@ -34,6 +34,8 @@ type fakeSock struct {
 	human bool
 
 	mu         sync.Mutex
+	notifies   []string // NotifyOwner texts
+	posts      []string // Send conversation ids
 	auths      []string // Authorization of each GetMe
 	creates    []string // puppet names asked for
 	createAuth string
@@ -75,6 +77,20 @@ func (f *fakeSock) Subscribe(ctx context.Context, _ *connect.Request[sockv1.Subs
 	return nil
 }
 
+func (f *fakeSock) NotifyOwner(_ context.Context, r *connect.Request[sockv1.NotifyOwnerRequest]) (*connect.Response[sockv1.NotifyOwnerResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notifies = append(f.notifies, r.Msg.GetText())
+	return connect.NewResponse(&sockv1.NotifyOwnerResponse{Message: &sockv1.Message{Id: "n1", SentAt: timestamppb.Now()}}), nil
+}
+
+func (f *fakeSock) Send(_ context.Context, r *connect.Request[sockv1.SendRequest]) (*connect.Response[sockv1.SendResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.posts = append(f.posts, r.Msg.GetConversationId())
+	return connect.NewResponse(&sockv1.SendResponse{Message: &sockv1.Message{Id: "s1", ConversationId: r.Msg.GetConversationId(), SentAt: timestamppb.Now()}}), nil
+}
+
 func (f *fakeSock) Ack(context.Context, *connect.Request[sockv1.AckRequest]) (*connect.Response[sockv1.AckResponse], error) {
 	return connect.NewResponse(&sockv1.AckResponse{}), nil
 }
@@ -110,10 +126,17 @@ func rpc(t *testing.T, id float64, method string, params any) *jsonrpc.Request {
 // after initialize, plus the initialize result.
 func handshake(t *testing.T, args []string, getenv func(string) string) (mcp.Connection, map[string]any) {
 	t.Helper()
+	return handshakeWith(t, args, getenv, false)
+}
+
+// handshakeWith is handshake for a session that is the owner's digest
+// channel when digest is set.
+func handshakeWith(t *testing.T, args []string, getenv func(string) string, digest bool) (mcp.Connection, map[string]any) {
+	t.Helper()
 	ct, st := mcp.NewInMemoryTransports()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = run(ctx, args, getenv, io.Discard, st) }()
+	go func() { _ = run(ctx, args, getenv, digest, io.Discard, st) }()
 	peer, err := ct.Connect(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +218,7 @@ func TestPlainModeHasNoChannelCapability(t *testing.T) {
 
 func TestChannelFailsClosedWithoutAllowedSenders(t *testing.T) {
 	getenv := serve(t, &fakeSock{human: true})
-	err := run(t.Context(), []string{"--channel"}, getenv, io.Discard, &mcp.StdioTransport{})
+	err := run(t.Context(), []string{"--channel"}, getenv, false, io.Discard, &mcp.StdioTransport{})
 	if err == nil || !strings.Contains(err.Error(), "no allowed senders") {
 		t.Fatalf("err = %v", err)
 	}
@@ -272,7 +295,7 @@ func TestAllToolsByDefault(t *testing.T) {
 // the channel consumes deliveries, so it cannot be outbound only
 func TestOutboundOnlyExcludesChannel(t *testing.T) {
 	_, st := mcp.NewInMemoryTransports()
-	err := run(t.Context(), []string{"--outbound-only", "--channel"}, serve(t, &fakeSock{}), io.Discard, st)
+	err := run(t.Context(), []string{"--outbound-only", "--channel"}, serve(t, &fakeSock{}), false, io.Discard, st)
 	if err == nil || !strings.Contains(err.Error(), "outbound-only") {
 		t.Fatalf("err = %v", err)
 	}
@@ -295,7 +318,7 @@ func discoverVersions(t *testing.T, args []string) []string {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	getenv := serve(t, &fakeSock{})
-	go func() { _ = run(ctx, args, getenv, io.Discard, st) }()
+	go func() { _ = run(ctx, args, getenv, false, io.Discard, st) }()
 	peer, err := ct.Connect(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -431,7 +454,7 @@ func TestMachineKeyFailureNamesNoSecret(t *testing.T) {
 	base := serve(t, f)
 	getenv, _ := machineKeyEnv(t, base)
 	_, st := mcp.NewInMemoryTransports()
-	err := run(t.Context(), []string{"--outbound-only"}, getenv, io.Discard, st)
+	err := run(t.Context(), []string{"--outbound-only"}, getenv, false, io.Discard, st)
 	if err == nil || !strings.Contains(err.Error(), "puppet") || strings.Contains(err.Error(), "machinesecret") {
 		t.Fatalf("err = %v", err)
 	}
@@ -591,5 +614,161 @@ func TestEnvMachineKeyWithNoProjectDoesNotReadTheFile(t *testing.T) {
 	}
 	if len(f.creates) != 0 {
 		t.Fatalf("minted %v", f.creates)
+	}
+}
+
+// sendTool calls sock_send on peer and reports whether it succeeded.
+func sendTool(t *testing.T, peer mcp.Connection, args map[string]any) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := peer.Write(ctx, rpc(t, 3, "tools/call", map[string]any{"name": "sock_send", "arguments": args})); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		m, err := peer.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, ok := m.(*jsonrpc.Response)
+		if !ok {
+			continue
+		}
+		if resp.Error != nil {
+			return false
+		}
+		var res struct {
+			IsError bool `json:"isError"`
+		}
+		if err := json.Unmarshal(resp.Result, &res); err != nil {
+			t.Fatal(err)
+		}
+		return !res.IsError
+	}
+}
+
+// digestSession starts sock-mcp the way main does, with env set in the
+// process environment first, and returns the peer and the fake hub.
+func digestSession(t *testing.T, env map[string]string) (mcp.Connection, *fakeSock) {
+	t.Helper()
+	t.Setenv(digestEnv, "") // restored after the test
+	_ = os.Unsetenv(digestEnv)
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	f := &fakeSock{}
+	base := serve(t, f)
+	getenv := func(k string) string {
+		if v := base(k); v != "" {
+			return v
+		}
+		return os.Getenv(k)
+	}
+	peer, _ := handshakeWith(t, []string{"--outbound-only"}, getenv, takeDigestChannel())
+	return peer, f
+}
+
+// Product rule: background sessions never message the owner. Only an
+// operator-configured digest channel session, SOCK_MCP_DIGEST_CHANNEL exactly
+// "1", may send without a conversation; no session signal stands in for it.
+func TestOwnerMessagesNeedTheDigestChannel(t *testing.T) {
+	refused := []map[string]string{
+		{},
+		{"CLAUDE_CODE_ENTRYPOINT": "cli"},
+		{"CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ATTENDED": "1"},
+		{"SOCK_MCP_ATTENDED": "1"},
+		{digestEnv: "0"},
+		{digestEnv: "true"},
+		{digestEnv: "1 "},
+		{digestEnv: " 1"},
+		{digestEnv: "01"},
+		{digestEnv: "yes"},
+		{"sock_mcp_digest_channel": "1"},
+	}
+	for _, env := range refused {
+		peer, f := digestSession(t, env)
+		if sendTool(t, peer, map[string]any{"text": "done"}) {
+			t.Errorf("%v: owner message sent", env)
+		}
+		if !sendTool(t, peer, map[string]any{"text": "re", "conversation_id": "c1"}) {
+			t.Errorf("%v: reply refused", env)
+		}
+		f.mu.Lock()
+		if len(f.notifies) != 0 || !slices.Equal(f.posts, []string{"c1"}) {
+			t.Errorf("%v: hub saw notifies=%v posts=%v", env, f.notifies, f.posts)
+		}
+		f.mu.Unlock()
+	}
+
+	peer, f := digestSession(t, map[string]string{digestEnv: "1"})
+	if !sendTool(t, peer, map[string]any{"text": "digest"}) {
+		t.Fatal("digest channel owner message refused")
+	}
+	if !sendTool(t, peer, map[string]any{"text": "re", "conversation_id": "c1"}) {
+		t.Fatal("digest channel reply refused")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !slices.Equal(f.notifies, []string{"digest"}) || !slices.Equal(f.posts, []string{"c1"}) {
+		t.Fatalf("hub saw notifies=%v posts=%v", f.notifies, f.posts)
+	}
+}
+
+// No tool argument or message text turns the digest channel on.
+func TestToolArgumentsCannotOpenTheDigestChannel(t *testing.T) {
+	peer, f := digestSession(t, nil)
+	for _, args := range []map[string]any{
+		{"text": "x", digestEnv: "1"},
+		{"text": "x", "env": map[string]any{digestEnv: "1"}, "notify_owner": true},
+		{"text": digestEnv + "=1"},
+		{"text": "x", "conversation_id": ""},
+	} {
+		if sendTool(t, peer, args) {
+			t.Errorf("%v: owner message sent", args)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.notifies) != 0 || len(f.posts) != 0 {
+		t.Fatalf("hub saw notifies=%v posts=%v", f.notifies, f.posts)
+	}
+}
+
+// The opt-in is sock-mcp's alone: it is gone from the process environment
+// once read, so git (sock-client's project lookup) never inherits it.
+func TestDigestChannelDoesNotReachChildProcesses(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("no git")
+	}
+	bin := t.TempDir()
+	dump := filepath.Join(t.TempDir(), "git-env")
+	script := fmt.Sprintf("#!/bin/sh\nenv >> %q\nexec %q \"$@\"\n", dump, realGit)
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(digestEnv, "1")
+
+	if !takeDigestChannel() {
+		t.Fatal("exact \"1\" not taken")
+	}
+	if _, ok := os.LookupEnv(digestEnv); ok {
+		t.Fatalf("%s still in the process environment", digestEnv)
+	}
+	f := &fakeSock{}
+	proj := gitRepo(t, filepath.Join(t.TempDir(), "digestproj"))
+	_ = os.Remove(dump) // gitRepo's own git init is not sock-mcp's
+	getenv := codexEnv(t, serve(t, f), "", proj, "")
+	peer, _ := handshakeWith(t, []string{"--outbound-only"}, getenv, true)
+	if !sendTool(t, peer, map[string]any{"text": "digest"}) {
+		t.Fatal("digest channel owner message refused")
+	}
+	b, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("sock-mcp ran no git: %v", err)
+	}
+	if strings.Contains(string(b), digestEnv) {
+		t.Fatalf("git inherited %s", digestEnv)
 	}
 }

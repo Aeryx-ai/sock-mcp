@@ -68,16 +68,30 @@ func puppetOptions(getenv func(string) string, stderr io.Writer) client.PuppetOp
 const outboundInstructions = "This server is outbound only: it has sock_send, sock_whoami and sock_list_conversations. " +
 	"There is no sock_fetch or sock_ack here; incoming messages are handled elsewhere, so do not look for them."
 
+// digestEnv marks the owner's digest channel session, the one session that
+// may message the owner without a conversation. An operator sets it in that
+// session's server config; nothing a model controls can.
+const digestEnv = "SOCK_MCP_DIGEST_CHANNEL"
+
+// takeDigestChannel reports whether digestEnv is exactly "1" and removes it
+// from the process environment, so no child process (git, for one) inherits
+// it. main calls it once, before anything else runs.
+func takeDigestChannel() bool {
+	on := os.Getenv(digestEnv) == "1"
+	_ = os.Unsetenv(digestEnv)
+	return on
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Getenv, os.Stderr, &mcp.StdioTransport{}); err != nil {
+	if err := run(ctx, os.Args[1:], os.Getenv, takeDigestChannel(), os.Stderr, &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintln(os.Stderr, "sock-mcp:", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string, getenv func(string) string, stderr io.Writer, transport mcp.Transport) error {
+func run(ctx context.Context, args []string, getenv func(string) string, digest bool, stderr io.Writer, transport mcp.Transport) error {
 	fs := flag.NewFlagSet("sock-mcp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	channelMode := fs.Bool("channel", false, "also push inbound messages to a Claude Code session (claude/channel)")
@@ -122,10 +136,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 		}
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: version}, opts)
+	policy := tools.Policy{NotifyOwner: digest}
 	if *outbound {
-		tools.RegisterOutbound(s, client)
+		tools.RegisterOutbound(s, client, policy)
 	} else {
-		tools.Register(s, client)
+		tools.Register(s, client, policy)
 	}
 	ss, err := s.Connect(ctx, tr, nil)
 	if err != nil {

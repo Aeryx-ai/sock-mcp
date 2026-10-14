@@ -27,9 +27,11 @@ func New(cfg client.Config, version string) *Client {
 	}
 }
 
-// LoadConfig reads SOCK_URL and SOCK_TOKEN through getenv and validates them.
+// LoadConfig reads SOCK_URL, SOCK_TOKEN and SOCK_ACCESS_GATE through getenv and
+// validates them. The gate (staging sits behind it) goes to the configured host
+// only, as sock-client's transport sends it.
 func LoadConfig(getenv func(string) string) (client.Config, error) {
-	c := client.Config{URL: client.DefaultURL, Token: strings.TrimSpace(getenv("SOCK_TOKEN"))}
+	c := client.Config{URL: client.DefaultURL, Token: strings.TrimSpace(getenv("SOCK_TOKEN")), AccessGate: strings.TrimSpace(getenv("SOCK_ACCESS_GATE"))}
 	if v := getenv("SOCK_URL"); v != "" {
 		c.URL = v
 	}

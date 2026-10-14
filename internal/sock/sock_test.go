@@ -44,3 +44,18 @@ func TestCallClassifies(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// the staging access gate is read like the token and goes to the configured
+// host only (sock-client's transport)
+func TestLoadConfigReadsTheAccessGate(t *testing.T) {
+	c, err := LoadConfig(env(map[string]string{"SOCK_TOKEN": "sock_pt_abc", "SOCK_ACCESS_GATE": " gate-1\n"}))
+	if err != nil || c.AccessGate != "gate-1" {
+		t.Fatalf("got %+v, %v", c, err)
+	}
+	if _, err := LoadConfig(env(map[string]string{"SOCK_TOKEN": "sock_pt_abc", "SOCK_ACCESS_GATE": "a b"})); err == nil {
+		t.Fatal("a gate with a space was accepted")
+	}
+	if c, err := LoadConfig(env(map[string]string{"SOCK_TOKEN": "sock_pt_abc"})); err != nil || c.AccessGate != "" {
+		t.Fatalf("no gate set: %+v, %v", c, err)
+	}
+}

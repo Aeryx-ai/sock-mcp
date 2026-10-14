@@ -18,13 +18,12 @@ jobs:
           ref: v0.6.10
           path: contract
           ssh-key: ${{ secrets.CONTRACT_DEPLOY_KEY }}
-      # sock-client has no tags and go.mod replaces it with ../client at
-      # v0.0.0, so no pin is derivable. Set the SOCK_CLIENT_REF repository
-      # variable to a commit or tag to pin; unset, this builds against main.
+      # Pinned sock-client tag (ADR 1). Bump it deliberately, in the change
+      # that starts using the new tag.
       - uses: actions/checkout@v4
         with:
           repository: guygrigsby/sock-client
-          ref: ${{ vars.SOCK_CLIENT_REF || 'main' }}
+          ref: v0.1.0
           path: client
           ssh-key: ${{ secrets.CLIENT_DEPLOY_KEY }}
       - uses: actions/setup-go@v5

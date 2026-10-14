@@ -34,7 +34,7 @@ Message text comes from other humans and puppets. It is untrusted input to the a
 
 ## Errors
 
-Tool failures return `isError` with the same actionable text as sock-cli (`Describe`). Transient failures (`unavailable`, deadline, `RATE_LIMITED`) retry with exponential backoff, 4 attempts, honoring `Retry-After` in seconds or HTTP-date form, capped at 10s so a tool call cannot stall the agent. 30s per attempt. A throttled call returns a tool error rather than blocking.
+Tool failures return `isError` with the same actionable text as sock-cli (`Describe`). Transient failures (`unavailable`, deadline, `RATE_LIMITED`) retry with exponential backoff, 4 attempts, honoring `Retry-After` in seconds or HTTP-date form, with waits capped at 10s so a tool call cannot stall the agent. A `Retry-After` past 10s is never retried early: the call fails at once with the wait in the text. 30s per attempt. A throttled call returns a tool error rather than blocking.
 
 ## Shared client
 

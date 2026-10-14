@@ -34,7 +34,8 @@ type fake struct {
 	notifies   []*sockv1.NotifyOwnerRequest
 	sends      []*sockv1.SendRequest
 	acked      [][]string
-	failSends  int // Send/NotifyOwner calls to fail with unavailable first
+	failSends  int   // Send/NotifyOwner calls to fail with unavailable first
+	sendErr    error // returned by every Send/NotifyOwner when set
 	fetchLimit int32
 	pending    []*sockv1.Message
 	meErr      error
@@ -57,11 +58,32 @@ func (f *fake) ListConversations(context.Context, *connect.Request[sockv1.ListCo
 }
 
 func (f *fake) failNow() bool {
+	if f.sendErr != nil {
+		return true
+	}
 	if f.failSends > 0 {
 		f.failSends--
 		return true
 	}
 	return false
+}
+
+func (f *fake) failure() error {
+	if f.sendErr != nil {
+		return f.sendErr
+	}
+	return retryable()
+}
+
+func rateLimited(retryAfter string) error {
+	e := connect.NewError(connect.CodeResourceExhausted, nil)
+	d, err := connect.NewErrorDetail(&sockv1.ErrorInfo{Reason: sockv1.ErrorReason_ERROR_REASON_RATE_LIMITED})
+	if err != nil {
+		panic(err)
+	}
+	e.AddDetail(d)
+	e.Meta().Set("Retry-After", retryAfter)
+	return e
 }
 
 func retryable() error {
@@ -79,7 +101,7 @@ func (f *fake) NotifyOwner(_ context.Context, r *connect.Request[sockv1.NotifyOw
 	defer f.mu.Unlock()
 	f.notifies = append(f.notifies, r.Msg)
 	if f.failNow() {
-		return nil, retryable()
+		return nil, f.failure()
 	}
 	return connect.NewResponse(&sockv1.NotifyOwnerResponse{Message: msg(r.Msg.GetText())}), nil
 }
@@ -89,7 +111,7 @@ func (f *fake) Send(_ context.Context, r *connect.Request[sockv1.SendRequest]) (
 	defer f.mu.Unlock()
 	f.sends = append(f.sends, r.Msg)
 	if f.failNow() {
-		return nil, retryable()
+		return nil, f.failure()
 	}
 	return connect.NewResponse(&sockv1.SendResponse{Message: msg(r.Msg.GetText())}), nil
 }
@@ -368,5 +390,31 @@ func TestExhaustedRetriesAreTransient(t *testing.T) {
 	res := call(t, start(t, &fake{meErr: retryable()}), "sock_whoami", nil)
 	if !res.IsError || !strings.HasPrefix(res.Content[0].(*mcp.TextContent).Text, "transient: ") {
 		t.Fatalf("res = %+v", res)
+	}
+}
+
+// A rate limit past the retry cap is not retried early: one call reaches the
+// hub and the tool error is transient and names the wait, so the model can
+// back off.
+func TestSendRateLimitedIsTransientWithTheWait(t *testing.T) {
+	for name, args := range map[string]map[string]any{
+		"owner":        {"text": "build done"},
+		"conversation": {"text": "hi", "conversation_id": "c9"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fake{sendErr: rateLimited("600")}
+			res := call(t, startWith(t, f, digest), "sock_send", args)
+			if !res.IsError {
+				t.Fatal("want isError")
+			}
+			if text := res.Content[0].(*mcp.TextContent).Text; text != "transient: sending too fast; try again in 10m0s" {
+				t.Fatalf("text = %q", text)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if n := len(f.notifies) + len(f.sends); n != 1 {
+				t.Fatalf("hub saw %d calls, want 1", n)
+			}
+		})
 	}
 }

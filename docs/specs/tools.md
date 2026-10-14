@@ -45,10 +45,10 @@ Internal retry: 4 attempts, 500ms doubling, capped 10s, `Retry-After` honored (s
 
 Failure is an MCP tool result with `isError: true` and one text content item. The text always starts with exactly one of:
 
-- `transient: ` retrying later can succeed. Covers `unavailable`, deadline exceeded and `RATE_LIMITED`, after the internal retries are spent.
+- `transient: ` retrying later can succeed. Covers `unavailable`, deadline exceeded and `RATE_LIMITED`, after the internal retries are spent. A `RATE_LIMITED` whose `Retry-After` is past the 10s retry cap is not retried: it fails at once and the text names the wait (`try again in 10m0s`), or says `try again later` when the hub sent none. The hub limits a puppet's posts into its owner's direct conversation ([ADR 20](../../../contract/docs/adr/0020-puppet-messages-to-their-owner-are-rate-limited.md)).
 - `permanent: ` retrying the same call will not help. Covers `TOKEN_INVALID`, `CALLER_NOT_ALLOWED`, `ACCOUNT_SUSPENDED`, `TERMS_NOT_ACCEPTED`, `NOT_FOUND`, `NOT_A_MEMBER`, `FIELD_INVALID`, `IDEMPOTENCY_MISMATCH`.
 
-After the prefix is human-readable text; do not parse it. Examples: `transient: sending too fast; the server's rate limit held after retries, try again later`, `permanent: the server rejected the token; set SOCK_TOKEN to a current puppet token`. Hooks that must never block the agent: call with a timeout, ignore any `isError`, and optionally log it.
+After the prefix is human-readable text; do not parse it. Examples: `transient: sending too fast; try again in 10m0s`, `permanent: the server rejected the token; set SOCK_TOKEN to a current puppet token`. Hooks that must never block the agent: call with a timeout, ignore any `isError`, and optionally log it.
 
 ## At-least-once and dedupe
 

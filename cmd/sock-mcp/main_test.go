@@ -434,3 +434,24 @@ func TestMachineKeyFailureNamesNoSecret(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// one project, two hubs, one state dir: each hub gets its own puppet, and a
+// token cached for one is never presented to the other
+func TestMachineKeyKeepsEachHubsPuppetApart(t *testing.T) {
+	a, b := &fakeSock{}, &fakeSock{}
+	getenvA, _ := machineKeyEnv(t, serve(t, a))
+	baseB := serve(t, b)
+	getenvB := func(k string) string {
+		if k == "SOCK_URL" {
+			return baseB("SOCK_URL")
+		}
+		return getenvA(k)
+	}
+	handshake(t, []string{"--outbound-only"}, getenvA)
+	handshake(t, []string{"--outbound-only"}, getenvB)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.creates) != 1 {
+		t.Fatalf("hub B created %v: it reused hub A's cached puppet", b.creates)
+	}
+}

@@ -64,7 +64,7 @@ func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) s
 	}
 	projects := &client.Projects{
 		API:  client.NewPuppetAPI(client.New(cfg, "sock-mcp/"+version), client.DefaultRetrier()),
-		Dir:  client.DefaultProjectsDir(getenv),
+		Dir:  client.ProjectsDir(getenv, cfg),
 		Host: client.ShortHost(),
 		Log:  func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, "sock-mcp: "+f+"\n", a...) },
 	}

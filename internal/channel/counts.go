@@ -34,7 +34,7 @@ type Counts struct {
 // ${XDG_STATE_HOME:-~/.local/state}/sock-mcp/pushes/<account id's hash>.
 func CountsDir(getenv func(string) string, accountID string) (string, error) {
 	state := getenv("XDG_STATE_HOME")
-	if state == "" {
+	if !filepath.IsAbs(state) { // XDG: a relative path is ignored
 		home := getenv("HOME")
 		if home == "" {
 			home = getenv("USERPROFILE")
@@ -78,37 +78,42 @@ func (c *Counts) path(id string) string { return filepath.Join(c.dir, hashName(i
 
 // Take reports whether id may be pushed once more, and records the push
 // before it happens. It fails safe: a count it cannot read or write is
-// treated as spent, so nothing is pushed that a restart could repeat.
-func (c *Counts) Take(id string) bool {
+// treated as spent (false, with the reason), so nothing is pushed that a
+// restart could repeat.
+func (c *Counts) Take(id string) (bool, error) {
 	if c == nil {
-		return false
+		return false, errors.New("no push counts")
 	}
 	p := c.path(id)
 	n := 0
 	switch b, err := os.ReadFile(p); {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
-		return false
+		return false, err
 	default:
 		n, err = strconv.Atoi(strings.TrimSpace(string(b)))
 		if err != nil || n < 0 {
-			return false
+			return false, fmt.Errorf("unreadable push count %q", b)
 		}
 	}
 	if n >= MaxPushes {
-		return false
+		return false, nil
 	}
 	tmp, err := os.CreateTemp(c.dir, ".tmp-*")
 	if err != nil {
-		return false
+		return false, err
 	}
 	_, werr := tmp.WriteString(strconv.Itoa(n + 1))
 	cerr := tmp.Close()
-	if werr != nil || cerr != nil || os.Rename(tmp.Name(), p) != nil {
+	if err := errors.Join(werr, cerr); err != nil {
 		_ = os.Remove(tmp.Name())
-		return false
+		return false, err
 	}
-	return true
+	if err := os.Rename(tmp.Name(), p); err != nil {
+		_ = os.Remove(tmp.Name())
+		return false, err
+	}
+	return true, nil
 }
 
 // Forget drops the counts of acked messages.

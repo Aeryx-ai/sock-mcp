@@ -445,19 +445,6 @@ func TestSendRateLimitedIsTransientWithTheWait(t *testing.T) {
 	}
 }
 
-// shownIn starts the tools with a ledger that the channel told of pushes:
-// m1 and m2 in c1, m3 in c2. forgot collects what the ledger hands back once
-// acked.
-func shownIn(t *testing.T, f *fake) (*mcp.ClientSession, *[]string) {
-	t.Helper()
-	var forgot []string
-	l := &tools.Ledger{Forget: func(ids ...string) { forgot = append(forgot, ids...) }}
-	l.Record("c1", "m1")
-	l.Record("c1", "m2")
-	l.Record("c2", "m3")
-	return startWith(t, f, tools.Policy{Ledger: l}), &forgot
-}
-
 func ackedIDs(f *fake) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -468,30 +455,44 @@ func ackedIDs(f *fake) []string {
 	return sortedCopy(out)
 }
 
-// Replying is acting on what the model was shown in that conversation: the
-// reply acks those deliveries, after the reply is posted, and no others.
-func TestReplyAcksWhatWasShownInThatConversation(t *testing.T) {
+func startAcked(t *testing.T, f *fake) (*mcp.ClientSession, *[]string) {
+	t.Helper()
+	var mu sync.Mutex
+	var got []string
+	cs := startWith(t, f, tools.Policy{Acked: func(ids ...string) { mu.Lock(); got = append(got, ids...); mu.Unlock() }})
+	return cs, &got
+}
+
+// A reply acks exactly the messages it names, after it posts.
+func TestReplyAcksTheMessagesItNames(t *testing.T) {
 	f := &fake{}
-	cs, forgot := shownIn(t, f)
-	structured(t, call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1"}))
+	cs, acked := startAcked(t, f)
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1", "message_ids": []string{"m1", "m2"}}))
 	if got := ackedIDs(f); strings.Join(got, ",") != "m1,m2" {
 		t.Fatalf("acked %v, want m1,m2", got)
 	}
-	if strings.Join(sortedCopy(*forgot), ",") != "m1,m2" {
-		t.Fatalf("forgot %v", *forgot)
+	if strings.Join(sortedCopy(*acked), ",") != "m1,m2" {
+		t.Fatalf("told %v", *acked)
 	}
-	structured(t, call(t, cs, "sock_send", map[string]any{"text": "again", "conversation_id": "c1"}))
-	if got := ackedIDs(f); len(got) != 2 {
-		t.Fatalf("second reply acked again: %v", got)
+}
+
+// A post naming no message acks nothing, whatever was pushed or fetched
+// before: neither proves the model saw a message.
+func TestPostNamingNoMessageAcksNothing(t *testing.T) {
+	f := &fake{pending: []*sockv1.Message{msg("x")}}
+	cs := start(t, f)
+	structured(t, call(t, cs, "sock_fetch", nil))
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "build done", "conversation_id": "c1"}))
+	if got := ackedIDs(f); len(got) != 0 {
+		t.Fatalf("acked %v", got)
 	}
 }
 
 // A reply that did not post acks nothing: the model has not answered.
 func TestFailedReplyAcksNothing(t *testing.T) {
-	e := connect.NewError(connect.CodePermissionDenied, nil)
-	f := &fake{sendErr: e}
-	cs, _ := shownIn(t, f)
-	if res := call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1"}); !res.IsError {
+	f := &fake{sendErr: connect.NewError(connect.CodePermissionDenied, nil)}
+	cs := start(t, f)
+	if res := call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1", "message_ids": []string{"m1"}}); !res.IsError {
 		t.Fatal("want isError")
 	}
 	if got := ackedIDs(f); len(got) != 0 {
@@ -499,45 +500,28 @@ func TestFailedReplyAcksNothing(t *testing.T) {
 	}
 }
 
-// A failed ack after a posted reply keeps the reply's success and the ids, so
-// the next reply in that conversation acks them.
-func TestReplyAckFailureRetriesOnTheNextReply(t *testing.T) {
+// A failed ack after a posted reply keeps the reply's success and tells no
+// one the ids were acked.
+func TestReplyAckFailureKeepsTheReply(t *testing.T) {
 	f := &fake{ackErr: connect.NewError(connect.CodePermissionDenied, nil)}
-	cs, forgot := shownIn(t, f)
-	structured(t, call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1"}))
-	if len(*forgot) != 0 {
-		t.Fatalf("forgot %v on a failed ack", *forgot)
-	}
-	f.mu.Lock()
-	f.ackErr = nil
-	f.mu.Unlock()
-	structured(t, call(t, cs, "sock_send", map[string]any{"text": "again", "conversation_id": "c1"}))
-	if strings.Join(sortedCopy(*forgot), ",") != "m1,m2" {
-		t.Fatalf("forgot %v", *forgot)
+	cs, acked := startAcked(t, f)
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1", "message_ids": []string{"m1"}}))
+	if len(*acked) != 0 {
+		t.Fatalf("told %v on a failed ack", *acked)
 	}
 }
 
-// What sock_fetch returned was shown to the model too.
-func TestReplyAcksWhatFetchShowed(t *testing.T) {
-	f := &fake{pending: []*sockv1.Message{msg("x")}}
-	cs := start(t, f)
-	structured(t, call(t, cs, "sock_fetch", nil))
-	structured(t, call(t, cs, "sock_send", map[string]any{"text": "on it", "conversation_id": "c1"}))
-	if got := ackedIDs(f); strings.Join(got, ",") != "m1" {
-		t.Fatalf("acked %v, want m1", got)
-	}
-}
-
-func TestAckForgetsTheIDs(t *testing.T) {
+func TestAckTellsAcked(t *testing.T) {
 	f := &fake{}
-	cs, forgot := shownIn(t, f)
+	cs, acked := startAcked(t, f)
 	structured(t, call(t, cs, "sock_ack", map[string]any{"message_ids": []string{"m3"}}))
-	if strings.Join(*forgot, ",") != "m3" {
-		t.Fatalf("forgot %v", *forgot)
+	if strings.Join(*acked, ",") != "m3" {
+		t.Fatalf("told %v", *acked)
 	}
-	structured(t, call(t, cs, "sock_send", map[string]any{"text": "x", "conversation_id": "c2"}))
-	if got := ackedIDs(f); strings.Join(got, ",") != "m3" {
-		t.Fatalf("acked %v; m3 was acked already and must not be again", got)
+	f.ackErr = connect.NewError(connect.CodePermissionDenied, nil)
+	call(t, cs, "sock_ack", map[string]any{"message_ids": []string{"m4"}})
+	if strings.Join(*acked, ",") != "m3" {
+		t.Fatalf("told %v after a failed ack", *acked)
 	}
 }
 
@@ -547,8 +531,8 @@ func TestToolsSayReplyingAcks(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tool := range res.Tools {
-		if (tool.Name == "sock_ack" || tool.Name == "sock_send") && !strings.Contains(tool.Description, "acknowledges") {
-			t.Errorf("%s description does not say a reply acknowledges: %q", tool.Name, tool.Description)
+		if (tool.Name == "sock_ack" || tool.Name == "sock_send") && !strings.Contains(tool.Description, "message_ids") {
+			t.Errorf("%s description does not say a reply's message_ids are acknowledged: %q", tool.Name, tool.Description)
 		}
 	}
 }
@@ -569,11 +553,11 @@ func TestWhoamiCountsPending(t *testing.T) {
 // The hub takes at most 500 ids per Ack.
 func TestReplyAcksInBatchesTheHubTakes(t *testing.T) {
 	f := &fake{}
-	l := &tools.Ledger{}
+	var ids []string
 	for i := range 1201 {
-		l.Record("c1", fmt.Sprint("m", i))
+		ids = append(ids, fmt.Sprint("m", i))
 	}
-	structured(t, call(t, startWith(t, f, tools.Policy{Ledger: l}), "sock_send", map[string]any{"text": "x", "conversation_id": "c1"}))
+	structured(t, call(t, start(t, f), "sock_send", map[string]any{"text": "x", "conversation_id": "c1", "message_ids": ids}))
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.acked) != 3 || len(f.acked[0]) != 500 || len(f.acked[2]) != 201 {

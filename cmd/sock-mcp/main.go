@@ -117,7 +117,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, digest 
 	}
 	var ch *channel.Channel
 	tr := &channel.Transport{Inner: transport}
-	ledger := &tools.Ledger{}
+	policy := tools.Policy{NotifyOwner: digest}
 	if *channelMode {
 		me, allow, err := allowlist(ctx, client, getenv)
 		if err != nil {
@@ -131,12 +131,12 @@ func run(ctx context.Context, args []string, getenv func(string) string, digest 
 		if err != nil {
 			return err
 		}
-		ledger.Forget = counts.Forget
+		policy.Acked = counts.Forget
 		opts.Capabilities = &mcp.ServerCapabilities{
 			Experimental: map[string]any{"claude/channel": map[string]any{}},
 		}
 		opts.Instructions = channel.Instructions
-		ch = &channel.Channel{Client: client, Allow: allow, Push: tr.Push, Counts: counts, Shown: ledger.Record, Log: slog.New(slog.NewTextHandler(stderr, nil))}
+		ch = &channel.Channel{Client: client, Allow: allow, Push: tr.Push, Counts: counts, Log: slog.New(slog.NewTextHandler(stderr, nil))}
 	}
 	// Events pushed before the client finishes initializing can be dropped,
 	// so the subscription starts at notifications/initialized.
@@ -147,7 +147,6 @@ func run(ctx context.Context, args []string, getenv func(string) string, digest 
 		}
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: version}, opts)
-	policy := tools.Policy{NotifyOwner: digest, Ledger: ledger}
 	if *outbound {
 		tools.RegisterOutbound(s, client, policy)
 	} else {

@@ -223,7 +223,17 @@ func TestChannelEndToEnd(t *testing.T) {
 	if got := f.acked(); len(got) != 0 {
 		t.Fatalf("acked %v on a push alone", got)
 	}
-	if !sendTool(t, peer, map[string]any{"text": "all green", "conversation_id": "c1"}) {
+	// A post into the conversation that names no message is no evidence the
+	// model saw the push: a session without channels can still find the
+	// owner's conversation and write there.
+	if !sendTool(t, peer, map[string]any{"text": "build done", "conversation_id": "c1"}) {
+		t.Fatal("send failed")
+	}
+	if got := f.acked(); len(got) != 0 {
+		t.Fatalf("acked %v on a post that answers no message", got)
+	}
+	// Naming the message from its channel tag is: the model had to see it.
+	if !sendTool(t, peer, map[string]any{"text": "all green", "conversation_id": "c1", "message_ids": []string{"m2"}}) {
 		t.Fatal("reply failed")
 	}
 	if got := f.acked(); !slices.Equal(got, []string{"m2"}) {

@@ -32,9 +32,8 @@ type Policy struct {
 	// NotifyOwner lets sock_send without a conversation_id message the owner.
 	// Only the owner's digest channel session sets it; the zero value refuses.
 	NotifyOwner bool
-	// Ledger is what this session showed the model, shared with the channel
-	// that pushes. Nil gets a ledger of the tools' own.
-	Ledger *Ledger
+	// Acked, when set, is told of message ids once the hub has acked them.
+	Acked func(ids ...string)
 }
 
 // Register adds every sock tool to s.
@@ -45,9 +44,6 @@ func Register(s *mcp.Server, c *sockclient.Client, p Policy) {
 }
 
 func newHandlers(c *sockclient.Client, p Policy) *handlers {
-	if p.Ledger == nil {
-		p.Ledger = &Ledger{}
-	}
 	return &handlers{c: c, p: p}
 }
 
@@ -76,7 +72,7 @@ func registerOutbound(s *mcp.Server, h *handlers) {
 		Title: "Send a message",
 		Description: "Reply with a Markdown message (1 to 65536 bytes) in conversation_id, the conversation of a message you are answering. " +
 			"Without conversation_id it would go to this puppet's owner unprompted, which only the owner's digest channel session may do; elsewhere it is refused. " +
-			"Posts once even if the call is retried. A posted reply acknowledges the messages you were shown in that conversation.",
+			"Posts once even if the call is retried. Put the message_id of each message the reply answers in message_ids: once the reply posts they are acknowledged and not delivered again.",
 		Annotations: hints("Send a message", false, true),
 	}, h.send)
 }
@@ -92,7 +88,7 @@ func registerInbound(s *mcp.Server, h *handlers) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "sock_ack",
 		Title: "Acknowledge messages",
-		Description: "Acknowledge messages that need no reply, by id, so they are not delivered again. A reply with sock_send already acknowledges the messages you were shown in its conversation. " +
+		Description: "Acknowledge messages that need no reply, by id, so they are not delivered again. A sock_send reply that lists message_ids already acknowledges those. " +
 			"Unknown or already acknowledged ids are ignored.",
 		Annotations: func() *mcp.ToolAnnotations {
 			a := hints("Acknowledge messages", false, false)
@@ -195,8 +191,9 @@ func (h *handlers) listConversations(ctx context.Context, _ *mcp.CallToolRequest
 
 // SendIn is the sock_send input.
 type SendIn struct {
-	Text           string `json:"text" jsonschema:"Markdown message body, 1 to 65536 bytes"`
-	ConversationID string `json:"conversation_id,omitempty" jsonschema:"conversation to post in; omitting it messages the owner and is refused outside the owner's digest channel session"`
+	Text           string   `json:"text" jsonschema:"Markdown message body, 1 to 65536 bytes"`
+	ConversationID string   `json:"conversation_id,omitempty" jsonschema:"conversation to post in; omitting it messages the owner and is refused outside the owner's digest channel session"`
+	MessageIDs     []string `json:"message_ids,omitempty" jsonschema:"ids of the messages this reply answers, from their channel tags or sock_fetch; acknowledged once the reply posts"`
 }
 
 // errNotifyOwner is sock_send's answer to a message for the owner from a
@@ -208,12 +205,6 @@ var errNotifyOwner = errors.New("permanent: this session may not message the own
 func (h *handlers) send(ctx context.Context, _ *mcp.CallToolRequest, in SendIn) (*mcp.CallToolResult, Message, error) {
 	if in.ConversationID == "" && !h.p.NotifyOwner {
 		return nil, Message{}, errNotifyOwner
-	}
-	// What the model had been shown when it chose to reply, not what arrives
-	// while the reply posts.
-	var shown []string
-	if in.ConversationID != "" {
-		shown = h.p.Ledger.shown(in.ConversationID)
 	}
 	key := rand.Text() // one key per tool call, reused by every retry
 	m, err := sockclient.Call(ctx, h.c, func(ctx context.Context) (*sockv1.Message, error) {
@@ -233,14 +224,11 @@ func (h *handlers) send(ctx context.Context, _ *mcp.CallToolRequest, in SendIn) 
 	if err != nil {
 		return nil, Message{}, err
 	}
-	if len(shown) > 0 {
-		// The reply posted, so it stands. A failed ack leaves the ids in the
-		// ledger for the next reply, and the hub redelivers them meanwhile.
-		for ids := range slices.Chunk(shown, ackMax) {
-			if err := h.ackIDs(ctx, ids); err == nil {
-				h.p.Ledger.acked(ids)
-			}
-		}
+	// Only ids the model names are acked: it can name a message only if it
+	// saw it, which a channel push alone never proves. The reply posted, so
+	// it stands; a failed ack leaves those messages pending for redelivery.
+	for ids := range slices.Chunk(in.MessageIDs, ackMax) {
+		_ = h.ackIDs(ctx, ids)
 	}
 	return nil, message(m), nil
 }
@@ -250,6 +238,9 @@ func (h *handlers) ackIDs(ctx context.Context, ids []string) error {
 		_, err := h.c.Messaging.Ack(ctx, connect.NewRequest(&sockv1.AckRequest{MessageIds: ids}))
 		return struct{}{}, err
 	})
+	if err == nil && h.p.Acked != nil {
+		h.p.Acked(ids...)
+	}
 	return err
 }
 
@@ -282,7 +273,6 @@ func (h *handlers) fetch(ctx context.Context, _ *mcp.CallToolRequest, in FetchIn
 	out := FetchOut{Messages: make([]Message, 0, len(msgs))}
 	for _, m := range msgs {
 		out.Messages = append(out.Messages, message(m))
-		h.p.Ledger.Record(m.GetConversationId(), m.GetId())
 	}
 	return nil, out, nil
 }
@@ -301,7 +291,6 @@ func (h *handlers) ack(ctx context.Context, _ *mcp.CallToolRequest, in AckIn) (*
 	if err := h.ackIDs(ctx, in.MessageIDs); err != nil {
 		return nil, AckOut{}, err
 	}
-	h.p.Ledger.acked(in.MessageIDs)
 	return nil, AckOut{Acked: len(in.MessageIDs)}, nil
 }
 

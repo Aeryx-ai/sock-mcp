@@ -67,12 +67,6 @@ func (f *fake) Ack(_ context.Context, r *connect.Request[sockv1.AckRequest]) (*c
 	return connect.NewResponse(&sockv1.AckResponse{}), nil
 }
 
-func (f *fake) log(e string) {
-	f.mu.Lock()
-	f.events = append(f.events, e)
-	f.mu.Unlock()
-}
-
 func msg(id, sender, text string) *sockv1.SubscribeResponse {
 	return &sockv1.SubscribeResponse{Event: &sockv1.SubscribeResponse_Message{Message: &sockv1.Message{
 		Id: id, ConversationId: "c1", Seq: 7, SenderId: sender,
@@ -123,7 +117,6 @@ func setupIn(t *testing.T, f *fake, dir string) (*Channel, *[]Event) {
 			f.mu.Unlock()
 			return nil
 		},
-		Shown: func(conv, id string) { f.log("shown:" + conv + "/" + id) },
 	}
 	return ch, &got
 }
@@ -161,12 +154,13 @@ func run(ch *Channel) (cancel func(), done chan error) {
 	return cancel, done
 }
 
-func TestPushesAllowedSenderAndRecordsItShown(t *testing.T) {
+func TestPushesAllowedSenderWithoutAck(t *testing.T) {
 	f := &fake{scripts: []script{sendAll(msg("m1", owner, "deploy it"))}}
 	ch, got := setup(t, f)
 	cancel, done := run(ch)
 	defer func() { cancel(); <-done }()
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.events) == 2 })
+	waitFor(t, func() bool { return pushes(got, f) == 1 })
+	time.Sleep(50 * time.Millisecond)
 	ev := (*got)[0]
 	want := map[string]string{"conversation_id": "c1", "message_id": "m1", "sender_id": owner, "seq": "7", "sent_at": "2026-10-11T12:00:00Z"}
 	if ev.Content != "deploy it" {
@@ -179,8 +173,8 @@ func TestPushesAllowedSenderAndRecordsItShown(t *testing.T) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.events) != 2 || f.events[0] != "push:m1" || f.events[1] != "shown:c1/m1" {
-		t.Fatalf("order = %v, want push then shown, no ack", f.events)
+	if len(f.events) != 1 || f.events[0] != "push:m1" {
+		t.Fatalf("events = %v, want one push and no ack", f.events)
 	}
 }
 
@@ -355,7 +349,7 @@ func TestSkipsReadMarkersAndUnknownEventsOnTheSameStream(t *testing.T) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(*got) != 1 || (*got)[0].Content != "after" || f.conns != 1 || len(f.events) != 2 || f.events[0] != "push:m1" || f.events[1] != "shown:c1/m1" {
+	if len(*got) != 1 || (*got)[0].Content != "after" || f.conns != 1 || len(f.events) != 1 || f.events[0] != "push:m1" {
 		t.Fatalf("pushed %v, events %v, conns %d", *got, f.events, f.conns)
 	}
 }
@@ -436,8 +430,8 @@ func TestUnwritableCountPushesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	if c.Take("m1") {
-		t.Fatal("Take pushed what it could not record")
+	if ok, err := c.Take("m1"); ok || err == nil {
+		t.Fatalf("Take = %v, %v; it must refuse, saying why, what it could not record", ok, err)
 	}
 }
 
@@ -465,7 +459,7 @@ func TestCountsArePrivateAndForgotten(t *testing.T) {
 	}
 	// any id, even one no file name could carry, gets its own count
 	for _, id := range []string{"m1", "../../etc/passwd", "", "a/b\x00"} {
-		if !c.Take(id) {
+		if ok, err := c.Take(id); !ok || err != nil {
 			t.Fatalf("first Take(%q) refused", id)
 		}
 	}
@@ -496,8 +490,8 @@ func TestOpenPrunesCountsPastTheHubsRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Take("old")
-	c.Take("new")
+	_, _ = c.Take("old")
+	_, _ = c.Take("new")
 	old := time.Now().Add(-countTTL - time.Hour)
 	if err := os.Chtimes(c.path("old"), old, old); err != nil {
 		t.Fatal(err)
@@ -510,5 +504,18 @@ func TestOpenPrunesCountsPastTheHubsRetention(t *testing.T) {
 	}
 	if _, err := os.Stat(c.path("new")); err != nil {
 		t.Fatalf("new count pruned: %v", err)
+	}
+}
+
+// XDG says a relative XDG_STATE_HOME is ignored, not an error.
+func TestCountsDirIgnoresARelativeStateHome(t *testing.T) {
+	env := map[string]string{"XDG_STATE_HOME": "rel", "HOME": "/home/g"}
+	dir, err := CountsDir(func(k string) string { return env[k] }, "acc")
+	if err != nil || !strings.HasPrefix(dir, "/home/g/.local/state/sock-mcp/pushes/") {
+		t.Fatalf("dir %q (%v)", dir, err)
+	}
+	env = map[string]string{}
+	if _, err := CountsDir(func(k string) string { return env[k] }, "acc"); err == nil {
+		t.Fatal("no home accepted")
 	}
 }

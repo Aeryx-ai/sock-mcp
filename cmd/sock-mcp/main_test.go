@@ -7,8 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,9 +30,29 @@ type fakeSock struct {
 	sockv1connect.UnimplementedIdentityServiceHandler
 	sockv1connect.UnimplementedMessagingServiceHandler
 	human bool
+
+	mu         sync.Mutex
+	auths      []string // Authorization of each GetMe
+	creates    []string // puppet names asked for
+	createAuth string
+	createErr  error
 }
 
-func (f *fakeSock) GetMe(context.Context, *connect.Request[sockv1.GetMeRequest]) (*connect.Response[sockv1.GetMeResponse], error) {
+func (f *fakeSock) CreatePuppet(_ context.Context, r *connect.Request[sockv1.CreatePuppetRequest]) (*connect.Response[sockv1.CreatePuppetResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.creates = append(f.creates, r.Msg.GetName())
+	f.createAuth = r.Header().Get("Authorization")
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	return connect.NewResponse(&sockv1.CreatePuppetResponse{Puppet: &sockv1.Account{Id: "proj-puppet"}, Token: "sock_pt_projdev_secret"}), nil
+}
+
+func (f *fakeSock) GetMe(_ context.Context, r *connect.Request[sockv1.GetMeRequest]) (*connect.Response[sockv1.GetMeResponse], error) {
+	f.mu.Lock()
+	f.auths = append(f.auths, r.Header().Get("Authorization"))
+	f.mu.Unlock()
 	a := &sockv1.Account{Id: "me", DisplayName: "bot", Kind: &sockv1.Account_Puppet{Puppet: &sockv1.Puppet{OwnerId: "owner-1", Name: "bot"}}}
 	if f.human {
 		a.Kind = &sockv1.Account_Human{Human: &sockv1.Human{Handle: "guy"}}
@@ -346,5 +369,68 @@ func TestChannelInitializeStillNegotiatesTheLegacyRevision(t *testing.T) {
 	_, init := handshake(t, []string{"--channel"}, serve(t, &fakeSock{}))
 	if v, _ := init["protocolVersion"].(string); v == "" || v >= "2026-07-28" {
 		t.Fatalf("protocolVersion = %q", v)
+	}
+}
+
+// integrations-bof (ADR 10): with a machine key as the credential, sock-mcp
+// runs as the project's own puppet.
+func machineKeyEnv(t *testing.T, base func(string) string) (func(string) string, string) {
+	t.Helper()
+	proj := filepath.Join(t.TempDir(), "myproj")
+	if err := os.Mkdir(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(t.TempDir(), "state")
+	env := map[string]string{
+		"SOCK_TOKEN": "sock_mk_dev_machinesecret", "SOCK_URL": base("SOCK_URL"),
+		"CLAUDE_PROJECT_DIR": proj, "XDG_STATE_HOME": state, "HOME": t.TempDir(),
+	}
+	return func(k string) string { return env[k] }, state
+}
+
+func TestMachineKeyRunsAsTheProjectsPuppet(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	getenv, state := machineKeyEnv(t, base)
+	handshake(t, []string{"--channel"}, getenv)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.creates) != 1 || !strings.HasPrefix(f.creates[0], "myproj on ") || f.createAuth != "Bearer sock_mk_dev_machinesecret" {
+		t.Fatalf("creates %v as %q", f.creates, f.createAuth)
+	}
+	if len(f.auths) == 0 {
+		t.Fatal("no call as the puppet")
+	}
+	for _, a := range f.auths {
+		if a != "Bearer sock_pt_projdev_secret" {
+			t.Fatalf("a call went out as %q: the machine key must only mint", a)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(state, "sock-integrations", "puppets")); err != nil {
+		t.Fatalf("no cache: %v", err)
+	}
+}
+
+func TestMachineKeyReusesTheCachedPuppet(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	getenv, _ := machineKeyEnv(t, base)
+	handshake(t, []string{"--outbound-only"}, getenv)
+	handshake(t, []string{"--outbound-only"}, getenv)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.creates) != 1 {
+		t.Fatalf("creates %v", f.creates)
+	}
+}
+
+func TestMachineKeyFailureNamesNoSecret(t *testing.T) {
+	f := &fakeSock{createErr: connect.NewError(connect.CodePermissionDenied, errors.New("nope sock_mk_dev_machinesecret"))}
+	base := serve(t, f)
+	getenv, _ := machineKeyEnv(t, base)
+	_, st := mcp.NewInMemoryTransports()
+	err := run(t.Context(), []string{"--outbound-only"}, getenv, io.Discard, st)
+	if err == nil || !strings.Contains(err.Error(), "puppet") || strings.Contains(err.Error(), "machinesecret") {
+		t.Fatalf("err = %v", err)
 	}
 }

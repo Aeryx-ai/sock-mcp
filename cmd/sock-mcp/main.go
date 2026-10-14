@@ -12,10 +12,12 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	client "github.com/guygrigsby/sock-client"
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 
 	"github.com/guygrigsby/sock-mcp/internal/channel"
@@ -45,6 +47,38 @@ func legacyHandshakeVersions() []string {
 	return out
 }
 
+// projectPuppet turns a machine key into the token of this project's puppet
+// (ADR 10). Any other credential is returned as it is. The machine key reaches
+// the hub only to make, list and erase puppets; every tool call goes out as the
+// puppet. A failure never carries the key.
+func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) string, stderr io.Writer) (client.Config, error) {
+	if client.TokenKind(cfg.Token) != client.KindMachineKey {
+		return cfg, nil
+	}
+	dir := getenv("CLAUDE_PROJECT_DIR")
+	if dir == "" {
+		var err error
+		if dir, err = os.Getwd(); err != nil {
+			return cfg, fmt.Errorf("project puppet: %w", err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	projects := &client.Projects{
+		API:  client.NewPuppetAPI(client.New(cfg, "sock-mcp/"+version), client.DefaultRetrier()),
+		Dir:  client.DefaultProjectsDir(getenv),
+		Host: client.ShortHost(),
+		Log:  func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, "sock-mcp: "+f+"\n", a...) },
+	}
+	projects.Sweep(ctx)
+	tok, err := projects.Ensure(ctx, dir)
+	if err != nil {
+		return cfg, errors.New(strings.ReplaceAll(err.Error(), cfg.Token, "[redacted]"))
+	}
+	cfg.Token = tok
+	return cfg, nil
+}
+
 // outboundInstructions tells the model the inbound tools are absent on purpose,
 // so it does not go looking for them.
 const outboundInstructions = "This server is outbound only: it has sock_send, sock_whoami and sock_list_conversations. " +
@@ -72,6 +106,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 	}
 	cfg, err := sockclient.LoadConfig(getenv, func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) })
 	if err != nil {
+		return err
+	}
+	if cfg, err = projectPuppet(ctx, cfg, getenv, stderr); err != nil {
 		return err
 	}
 	client := sockclient.New(cfg, version)

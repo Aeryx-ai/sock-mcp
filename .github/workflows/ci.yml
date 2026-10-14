@@ -2,7 +2,10 @@ name: ci
 on:
   push:
     branches: [main, v1]
+    # beads exports alone build nothing: never a red run for an issue update
+    paths-ignore: ['.beads/**']
   pull_request:
+    paths-ignore: ['.beads/**']
 jobs:
   check:
     runs-on: ubuntu-latest

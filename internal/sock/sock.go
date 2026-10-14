@@ -27,18 +27,47 @@ func New(cfg client.Config, version string) *Client {
 	}
 }
 
-// LoadConfig reads SOCK_URL, SOCK_TOKEN and SOCK_ACCESS_GATE through getenv and
-// validates them. The gate (staging sits behind it) goes to the configured host
-// only, as sock-client's transport sends it.
-func LoadConfig(getenv func(string) string) (client.Config, error) {
+// LoadConfig resolves the configuration from one source, never a mix, so a
+// token is only ever sent to the URL that came with it. With SOCK_TOKEN set it
+// is SOCK_URL, SOCK_TOKEN and SOCK_ACCESS_GATE from getenv and the CLI's config
+// file is not read. With SOCK_TOKEN unset (a host such as a Codex plugin starts
+// the server without the environment) it is the token, url and access_gate of
+// the CLI's config file (mode 0600 when it holds a secret); an ambient SOCK_URL
+// or SOCK_ACCESS_GATE is then ignored, and logf (may be nil) says so once. The
+// gate goes to the configured host only, as sock-client's transport sends it.
+func LoadConfig(getenv func(string) string, logf func(format string, args ...any)) (client.Config, error) {
 	c := client.Config{URL: client.DefaultURL, Token: strings.TrimSpace(getenv("SOCK_TOKEN")), AccessGate: strings.TrimSpace(getenv("SOCK_ACCESS_GATE"))}
 	if v := getenv("SOCK_URL"); v != "" {
 		c.URL = v
+	}
+	if c.Token == "" {
+		if fc, path, err := fileConfig(getenv); err != nil {
+			return client.Config{}, err
+		} else if strings.TrimSpace(fc.Token) != "" {
+			if logf != nil && (getenv("SOCK_URL") != "" || getenv("SOCK_ACCESS_GATE") != "") {
+				logf("sock-mcp: ignoring SOCK_URL and SOCK_ACCESS_GATE: the token comes from %s, so the URL and gate do too", path)
+			}
+			c = client.Config{URL: client.DefaultURL, Token: strings.TrimSpace(fc.Token), AccessGate: strings.TrimSpace(fc.AccessGate)}
+			if fc.URL != "" {
+				c.URL = fc.URL
+			}
+		}
 	}
 	if err := client.Validate(c); err != nil {
 		return client.Config{}, err
 	}
 	return c, nil
+}
+
+// fileConfig reads the CLI's config file. No home directory, or no file, is an
+// empty config, not an error: the caller reports the missing token.
+func fileConfig(getenv func(string) string) (client.FileConfig, string, error) {
+	path, err := client.DefaultConfigPath(getenv)
+	if err != nil {
+		return client.FileConfig{}, "", nil
+	}
+	fc, err := client.LoadFileConfig(path)
+	return fc, path, err
 }
 
 // Call runs one unary RPC with the client's retry policy. The error is

@@ -50,7 +50,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 	if *outbound && *channelMode {
 		return errors.New("--outbound-only and --channel cannot be combined: the channel consumes deliveries")
 	}
-	cfg, err := sock.LoadConfig(getenv)
+	cfg, err := sock.LoadConfig(getenv, func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) })
 	if err != nil {
 		return err
 	}

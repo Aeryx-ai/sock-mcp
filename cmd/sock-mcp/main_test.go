@@ -186,7 +186,7 @@ func TestChannelFailsClosedWithoutAllowedSenders(t *testing.T) {
 
 func mustClient(t *testing.T, getenv func(string) string) *sock.Client {
 	t.Helper()
-	cfg, err := sock.LoadConfig(getenv)
+	cfg, err := sock.LoadConfig(getenv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

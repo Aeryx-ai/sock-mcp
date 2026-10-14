@@ -58,7 +58,7 @@ func registerOutbound(s *mcp.Server, h *handlers) {
 	}, h.listConversations)
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "sock_send",
-		Description: "Send a Markdown message (1 to 65536 bytes) to conversation_id, a conversation this account is in. " +
+		Description: "Reply with a Markdown message (1 to 65536 bytes) in conversation_id, the conversation of a message you are answering. " +
 			"Without conversation_id it would go to this puppet's owner unprompted, which only the owner's digest channel session may do; elsewhere it is refused. " +
 			"Posts once even if the call is retried.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)},
@@ -159,7 +159,7 @@ type SendIn struct {
 // errNotifyOwner is sock_send's answer to a message for the owner from a
 // session that is not the owner's digest channel.
 var errNotifyOwner = errors.New("permanent: this session may not message the owner unprompted, so nothing was sent. " +
-	"To answer the owner, reply with conversation_id set to a conversation the owner wrote in (sock_list_conversations lists them). " +
+	"To answer a message the owner sent you, reply with that message's conversation_id; do not look up a conversation to reach the owner some other way. " +
 	"To get the owner's attention, finish your turn: the sock plugin's hooks ask the owner when a person is at this session")
 
 func (h *handlers) send(ctx context.Context, _ *mcp.CallToolRequest, in SendIn) (*mcp.CallToolResult, Message, error) {

@@ -267,6 +267,15 @@ func TestSendKeysDifferPerCall(t *testing.T) {
 func TestSendToOwnerIsRefusedByDefault(t *testing.T) {
 	f := &fake{}
 	cs := start(t, f)
+	tl, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range tl.Tools {
+		if x.Name == "sock_send" && strings.Contains(x.Description, "sock_list_conversations") {
+			t.Fatalf("sock_send description points at the owner lookup: %q", x.Description)
+		}
+	}
 	for _, args := range []map[string]any{
 		{"text": "build done"},
 		{"text": "build done", "conversation_id": ""},
@@ -277,7 +286,10 @@ func TestSendToOwnerIsRefusedByDefault(t *testing.T) {
 			t.Fatalf("%v: sent, want refused", args)
 		}
 		text := res.Content[0].(*mcp.TextContent).Text
-		if !strings.HasPrefix(text, "permanent: ") || !strings.Contains(text, "conversation_id") || strings.Contains(text, token) {
+		// it must not send the model looking up the owner's direct conversation,
+		// which the hub accepts a Send into
+		if !strings.HasPrefix(text, "permanent: ") || !strings.Contains(text, "conversation_id") || strings.Contains(text, token) ||
+			strings.Contains(text, "sock_list_conversations") || strings.Contains(text, "sock_whoami") {
 			t.Fatalf("refusal = %q", text)
 		}
 	}

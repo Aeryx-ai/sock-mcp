@@ -1,6 +1,8 @@
-// Package sock is sock-mcp's view of the shared sock client: env config, the
-// retry policy for interactive tool calls, and transient/permanent errors.
-package sock
+// Package sockclient is sock-mcp's view of the shared sock client: env config,
+// the retry policy for interactive tool calls, and transient/permanent errors.
+//
+// Importable: sock-mcpd links this package.
+package sockclient
 
 import (
 	"context"

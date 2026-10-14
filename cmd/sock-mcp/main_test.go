@@ -20,7 +20,7 @@ import (
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 	"github.com/guygrigsby/sock-contract/gen/go/sock/v1/sockv1connect"
 
-	"github.com/guygrigsby/sock-mcp/internal/sock"
+	"github.com/guygrigsby/sock-mcp/sockclient"
 )
 
 type fakeSock struct {
@@ -185,13 +185,13 @@ func TestChannelFailsClosedWithoutAllowedSenders(t *testing.T) {
 	}
 }
 
-func mustClient(t *testing.T, getenv func(string) string) *sock.Client {
+func mustClient(t *testing.T, getenv func(string) string) *sockclient.Client {
 	t.Helper()
-	cfg, err := sock.LoadConfig(getenv, nil)
+	cfg, err := sockclient.LoadConfig(getenv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return sock.New(cfg, "test")
+	return sockclient.New(cfg, "test")
 }
 
 func toolNames(t *testing.T, peer mcp.Connection) []string {

@@ -19,8 +19,8 @@ import (
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 
 	"github.com/guygrigsby/sock-mcp/internal/channel"
-	"github.com/guygrigsby/sock-mcp/internal/sock"
-	"github.com/guygrigsby/sock-mcp/internal/tools"
+	"github.com/guygrigsby/sock-mcp/sockclient"
+	"github.com/guygrigsby/sock-mcp/tools"
 )
 
 var version = "dev"
@@ -70,11 +70,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 	if *outbound && *channelMode {
 		return errors.New("--outbound-only and --channel cannot be combined: the channel consumes deliveries")
 	}
-	cfg, err := sock.LoadConfig(getenv, func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) })
+	cfg, err := sockclient.LoadConfig(getenv, func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) })
 	if err != nil {
 		return err
 	}
-	client := sock.New(cfg, version)
+	client := sockclient.New(cfg, version)
 	opts := &mcp.ServerOptions{}
 	if *outbound {
 		opts.Instructions = outboundInstructions
@@ -126,9 +126,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 
 // allowlist is the sender ids the channel may push: the puppet's owner plus
 // SOCK_CHANNEL_ALLOW (comma separated account ids). Empty fails closed.
-func allowlist(ctx context.Context, c *sock.Client, getenv func(string) string) (map[string]bool, error) {
+func allowlist(ctx context.Context, c *sockclient.Client, getenv func(string) string) (map[string]bool, error) {
 	allow := map[string]bool{}
-	me, err := sock.Call(ctx, c, func(ctx context.Context) (*sockv1.Account, error) {
+	me, err := sockclient.Call(ctx, c, func(ctx context.Context) (*sockv1.Account, error) {
 		res, err := c.Identity.GetMe(ctx, connect.NewRequest(&sockv1.GetMeRequest{}))
 		if err != nil {
 			return nil, err

@@ -20,7 +20,7 @@ import (
 
 	client "github.com/guygrigsby/sock-client"
 
-	"github.com/guygrigsby/sock-mcp/internal/sock"
+	"github.com/guygrigsby/sock-mcp/sockclient"
 )
 
 const owner = "owner-1"
@@ -94,7 +94,7 @@ func setup(t *testing.T, f *fake) (*Channel, *[]Event) {
 	mux.Handle(p, h)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	c := sock.New(client.Config{URL: srv.URL, Token: "sock_pt_t"}, "test")
+	c := sockclient.New(client.Config{URL: srv.URL, Token: "sock_pt_t"}, "test")
 	var mu sync.Mutex
 	var got []Event
 	ch := &Channel{

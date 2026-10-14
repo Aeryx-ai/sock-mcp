@@ -1,5 +1,7 @@
 // Package tools registers the sock MCP tools. Tool outputs are flat structs of
 // their own, so wire types never reach a tool schema.
+//
+// Importable: sock-mcpd links this package.
 package tools
 
 import (
@@ -12,7 +14,7 @@ import (
 
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 
-	"github.com/guygrigsby/sock-mcp/internal/sock"
+	"github.com/guygrigsby/sock-mcp/sockclient"
 )
 
 // fetchDefault and fetchMax bound sock_fetch; the API allows up to 500.
@@ -22,7 +24,7 @@ const (
 )
 
 // Register adds every sock tool to s.
-func Register(s *mcp.Server, c *sock.Client) {
+func Register(s *mcp.Server, c *sockclient.Client) {
 	h := &handlers{c: c}
 	registerOutbound(s, h)
 	registerInbound(s, h)
@@ -31,7 +33,7 @@ func Register(s *mcp.Server, c *sock.Client) {
 // RegisterOutbound registers only the tools that message the owner and look
 // around: sock_whoami, sock_list_conversations and sock_send. sock_fetch and
 // sock_ack consume deliveries, which something else (sock listen) owns.
-func RegisterOutbound(s *mcp.Server, c *sock.Client) {
+func RegisterOutbound(s *mcp.Server, c *sockclient.Client) {
 	registerOutbound(s, &handlers{c: c})
 }
 
@@ -69,7 +71,7 @@ func registerInbound(s *mcp.Server, h *handlers) {
 
 func ptr[T any](v T) *T { return &v }
 
-type handlers struct{ c *sock.Client }
+type handlers struct{ c *sockclient.Client }
 
 // Account is who an account is.
 type Account struct {
@@ -99,7 +101,7 @@ type Message struct {
 }
 
 func (h *handlers) whoami(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, Account, error) {
-	a, err := sock.Call(ctx, h.c, func(ctx context.Context) (*sockv1.Account, error) {
+	a, err := sockclient.Call(ctx, h.c, func(ctx context.Context) (*sockv1.Account, error) {
 		res, err := h.c.Identity.GetMe(ctx, connect.NewRequest(&sockv1.GetMeRequest{}))
 		if err != nil {
 			return nil, err
@@ -118,7 +120,7 @@ type ListConversationsOut struct {
 }
 
 func (h *handlers) listConversations(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, ListConversationsOut, error) {
-	convs, err := sock.Call(ctx, h.c, func(ctx context.Context) ([]*sockv1.Conversation, error) {
+	convs, err := sockclient.Call(ctx, h.c, func(ctx context.Context) ([]*sockv1.Conversation, error) {
 		res, err := h.c.Messaging.ListConversations(ctx, connect.NewRequest(&sockv1.ListConversationsRequest{}))
 		if err != nil {
 			return nil, err
@@ -143,7 +145,7 @@ type SendIn struct {
 
 func (h *handlers) send(ctx context.Context, _ *mcp.CallToolRequest, in SendIn) (*mcp.CallToolResult, Message, error) {
 	key := rand.Text() // one key per tool call, reused by every retry
-	m, err := sock.Call(ctx, h.c, func(ctx context.Context) (*sockv1.Message, error) {
+	m, err := sockclient.Call(ctx, h.c, func(ctx context.Context) (*sockv1.Message, error) {
 		if in.ConversationID == "" {
 			res, err := h.c.Messaging.NotifyOwner(ctx, connect.NewRequest(&sockv1.NotifyOwnerRequest{Text: in.Text, IdempotencyKey: key}))
 			if err != nil {
@@ -179,7 +181,7 @@ func (h *handlers) fetch(ctx context.Context, _ *mcp.CallToolRequest, in FetchIn
 		limit = fetchDefault
 	}
 	limit = min(limit, fetchMax)
-	msgs, err := sock.Call(ctx, h.c, func(ctx context.Context) ([]*sockv1.Message, error) {
+	msgs, err := sockclient.Call(ctx, h.c, func(ctx context.Context) ([]*sockv1.Message, error) {
 		res, err := h.c.Messaging.FetchPending(ctx, connect.NewRequest(&sockv1.FetchPendingRequest{Limit: int32(limit)}))
 		if err != nil {
 			return nil, err
@@ -207,7 +209,7 @@ type AckOut struct {
 }
 
 func (h *handlers) ack(ctx context.Context, _ *mcp.CallToolRequest, in AckIn) (*mcp.CallToolResult, AckOut, error) {
-	_, err := sock.Call(ctx, h.c, func(ctx context.Context) (struct{}, error) {
+	_, err := sockclient.Call(ctx, h.c, func(ctx context.Context) (struct{}, error) {
 		_, err := h.c.Messaging.Ack(ctx, connect.NewRequest(&sockv1.AckRequest{MessageIds: in.MessageIDs}))
 		return struct{}{}, err
 	})

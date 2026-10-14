@@ -14,7 +14,7 @@ import (
 
 	client "github.com/guygrigsby/sock-client"
 
-	"github.com/guygrigsby/sock-mcp/internal/sock"
+	"github.com/guygrigsby/sock-mcp/sockclient"
 )
 
 const (
@@ -31,7 +31,7 @@ const Instructions = `Messages from sock arrive as <channel source="sock" conver
 
 // Channel subscribes to sock and pushes allowed senders' messages.
 type Channel struct {
-	Client *sock.Client
+	Client *sockclient.Client
 	// Allow is the set of sender account ids whose messages are pushed.
 	// Anything else is dropped unacked. Empty means nothing is pushed.
 	Allow map[string]bool
@@ -158,7 +158,7 @@ func (c *Channel) handle(ctx context.Context, m *sockv1.Message) error {
 		return err
 	}
 	// Pushed, so ack. A failed ack leaves it pending; seen stops a repeat push.
-	_, err := sock.Call(ctx, c.Client, func(ctx context.Context) (struct{}, error) {
+	_, err := sockclient.Call(ctx, c.Client, func(ctx context.Context) (struct{}, error) {
 		_, err := c.Client.Messaging.Ack(ctx, connect.NewRequest(&sockv1.AckRequest{MessageIds: []string{m.GetId()}}))
 		return struct{}{}, err
 	})

@@ -2,6 +2,8 @@
 
 Consumers (plugin, hook and SDK packaging) build against this file. Design rationale: [design.md](design.md). Schemas below are what `tools/list` returns; field names are stable.
 
+The `tools` and `sockclient` packages are importable (`github.com/guygrigsby/sock-mcp/tools`, `.../sockclient`); sock-mcpd links them.
+
 ## Run
 
 `sock-mcp` speaks MCP over stdio. Transport is stdio only in v1. Hosted Streamable HTTP is not offered: it would make sock-mcp a multi-tenant proxy holding other people's tokens, and whether a `sock_pt_` token is accepted in an OAuth `authorization` field is untested. Revisit with a real need.

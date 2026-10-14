@@ -24,6 +24,18 @@ const (
 // Register adds every sock tool to s.
 func Register(s *mcp.Server, c *sock.Client) {
 	h := &handlers{c: c}
+	registerOutbound(s, h)
+	registerInbound(s, h)
+}
+
+// RegisterOutbound registers only the tools that message the owner and look
+// around: sock_whoami, sock_list_conversations and sock_send. sock_fetch and
+// sock_ack consume deliveries, which something else (sock listen) owns.
+func RegisterOutbound(s *mcp.Server, c *sock.Client) {
+	registerOutbound(s, &handlers{c: c})
+}
+
+func registerOutbound(s *mcp.Server, h *handlers) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "sock_whoami",
 		Description: "Show the sock account this server acts as: id, display name, and whether it is a puppet (with its owner) or a human.",
@@ -39,6 +51,9 @@ func Register(s *mcp.Server, c *sock.Client) {
 		Description: "Send a Markdown message (1 to 65536 bytes). Without conversation_id it goes to this puppet's owner (puppet tokens only). Posts once even if the call is retried.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)},
 	}, h.send)
+}
+
+func registerInbound(s *mcp.Server, h *handlers) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "sock_fetch",
 		Description: "Fetch pending (unacknowledged) messages, oldest first per conversation. Does not acknowledge: call sock_ack after handling them, " +

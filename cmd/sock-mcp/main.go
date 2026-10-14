@@ -25,6 +25,11 @@ import (
 
 var version = "dev"
 
+// outboundInstructions tells the model the inbound tools are absent on purpose,
+// so it does not go looking for them.
+const outboundInstructions = "This server is outbound only: it has sock_send, sock_whoami and sock_list_conversations. " +
+	"There is no sock_fetch or sock_ack here; incoming messages are handled elsewhere, so do not look for them."
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -38,8 +43,12 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 	fs := flag.NewFlagSet("sock-mcp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	channelMode := fs.Bool("channel", false, "also push inbound messages to a Claude Code session (claude/channel)")
+	outbound := fs.Bool("outbound-only", false, "serve only sock_whoami, sock_list_conversations and sock_send (no sock_fetch or sock_ack)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *outbound && *channelMode {
+		return errors.New("--outbound-only and --channel cannot be combined: the channel consumes deliveries")
 	}
 	cfg, err := sock.LoadConfig(getenv)
 	if err != nil {
@@ -47,6 +56,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 	}
 	client := sock.New(cfg, version)
 	opts := &mcp.ServerOptions{}
+	if *outbound {
+		opts.Instructions = outboundInstructions
+	}
 	var ch *channel.Channel
 	tr := &channel.Transport{Inner: transport}
 	if *channelMode {
@@ -69,7 +81,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 		}
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: version}, opts)
-	tools.Register(s, client)
+	if *outbound {
+		tools.RegisterOutbound(s, client)
+	} else {
+		tools.Register(s, client)
+	}
 	ss, err := s.Connect(ctx, tr, nil)
 	if err != nil {
 		return err

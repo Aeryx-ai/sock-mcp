@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -190,4 +191,71 @@ func mustClient(t *testing.T, getenv func(string) string) *sock.Client {
 		t.Fatal(err)
 	}
 	return sock.New(cfg, "test")
+}
+
+func toolNames(t *testing.T, peer mcp.Connection) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := peer.Write(ctx, rpc(t, 2, "tools/list", map[string]any{})); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		m, err := peer.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, ok := m.(*jsonrpc.Response)
+		if !ok {
+			continue
+		}
+		var res struct {
+			Tools []struct{ Name string } `json:"tools"`
+		}
+		if err := json.Unmarshal(resp.Result, &res); err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, tl := range res.Tools {
+			names = append(names, tl.Name)
+		}
+		slices.Sort(names)
+		return names
+	}
+}
+
+// integrations rule 2: an agent next to `sock listen` must not see the tools
+// that consume deliveries.
+func TestOutboundOnlyServesTheSendingTools(t *testing.T) {
+	peer, _ := handshake(t, []string{"--outbound-only"}, serve(t, &fakeSock{}))
+	got := toolNames(t, peer)
+	want := []string{"sock_list_conversations", "sock_send", "sock_whoami"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("tools %v, want %v", got, want)
+	}
+}
+
+func TestAllToolsByDefault(t *testing.T) {
+	peer, _ := handshake(t, nil, serve(t, &fakeSock{}))
+	got := toolNames(t, peer)
+	if len(got) != 5 || !slices.Contains(got, "sock_fetch") || !slices.Contains(got, "sock_ack") {
+		t.Fatalf("tools %v", got)
+	}
+}
+
+// the channel consumes deliveries, so it cannot be outbound only
+func TestOutboundOnlyExcludesChannel(t *testing.T) {
+	_, st := mcp.NewInMemoryTransports()
+	err := run(t.Context(), []string{"--outbound-only", "--channel"}, serve(t, &fakeSock{}), io.Discard, st)
+	if err == nil || !strings.Contains(err.Error(), "outbound-only") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestOutboundOnlyInstructionsSayInboundIsAbsent(t *testing.T) {
+	_, init := handshake(t, []string{"--outbound-only"}, serve(t, &fakeSock{}))
+	ins, _ := init["instructions"].(string)
+	if !strings.Contains(ins, "sock_fetch") || !strings.Contains(ins, "outbound only") {
+		t.Fatalf("instructions = %q", ins)
+	}
 }

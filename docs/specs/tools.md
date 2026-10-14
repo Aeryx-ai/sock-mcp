@@ -70,3 +70,7 @@ What it adds:
 Platform constraints (Claude Code channels reference): research preview; custom channels need `--dangerously-load-development-channels server:sock` (or `plugin:...`), interactive only and ignored under `-p`; Team and Enterprise orgs must enable channels. Events pushed while Claude is busy are batched on the next turn.
 
 In channel mode, do not also run a `sock_fetch`/`sock_ack` hook against the same puppet: both consume the same deliveries. Pick one consumer per puppet.
+
+## Outbound only
+
+`--outbound-only` registers only `sock_whoami`, `sock_list_conversations` and `sock_send`; names, schemas and descriptions are unchanged. `sock_fetch` and `sock_ack` consume deliveries, so an agent beside `sock listen` (one consumer per puppet) must not see them, and a host without a tool filter (a Codex plugin's `mcp.json`) needs the server to enforce it. Combined with `--channel` it is a usage error, since the channel consumes deliveries. The initialize `instructions` say the inbound tools are absent on purpose. Default behavior is unchanged.

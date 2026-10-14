@@ -210,6 +210,23 @@ func TestListsTools(t *testing.T) {
 	}
 }
 
+// Directory review reads a title and every hint as an explicit boolean
+// (claude.com/docs/connectors/building/review-criteria,
+// developers.openai.com/apps-sdk/app-submission-guidelines).
+func TestEveryToolHasATitleAndExplicitHints(t *testing.T) {
+	cs := start(t, &fake{})
+	res, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		a := tool.Annotations
+		if tool.Title == "" || a == nil || a.Title != tool.Title || a.DestructiveHint == nil || a.OpenWorldHint == nil {
+			t.Errorf("%s: title %q, annotations %+v", tool.Name, tool.Title, a)
+		}
+	}
+}
+
 func sortedCopy(s []string) []string {
 	out := append([]string{}, s...)
 	for i := range out {

@@ -158,3 +158,38 @@ func TestLoadConfigRefusesAHumanTokenInPuppetToken(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// sock-cli-qb6: a Codex plugin gets no SOCK_TOKEN, so the file's machine key
+// stands in for it and sock-mcp makes the project's puppet with it.
+func TestLoadConfigFileMachineKey(t *testing.T) {
+	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\nmachine_key = \"sock_mk_dev_secret\"\naccess_gate = \"gate-f\"\n")
+	c, err := LoadConfig(g, nil)
+	if err != nil || c.Token != "sock_mk_dev_secret" || c.URL != "https://file.example" || c.AccessGate != "gate-f" {
+		t.Fatalf("got %+v, %v", c, err)
+	}
+}
+
+// precedence: SOCK_TOKEN, then machine_key, then puppet_token
+func TestLoadConfigMachineKeyPrecedence(t *testing.T) {
+	g := writeCLIConfig(t, 0o600, "machine_key = \"sock_mk_dev_secret\"\npuppet_token = \"sock_pt_file\"\n")
+	if c, err := LoadConfig(g, nil); err != nil || c.Token != "sock_mk_dev_secret" {
+		t.Fatalf("file: got %+v, %v", c, err)
+	}
+	if c, err := LoadConfig(withEnv(g, map[string]string{"SOCK_TOKEN": "sock_pt_env"}), nil); err != nil || c.Token != "sock_pt_env" {
+		t.Fatalf("env: got %+v, %v", c, err)
+	}
+}
+
+func TestLoadConfigFileMachineKeyMustBeOne(t *testing.T) {
+	g := writeCLIConfig(t, 0o600, "machine_key = \"sock_pt_notakey\"\n")
+	if _, err := LoadConfig(g, nil); err == nil || !strings.Contains(err.Error(), "machine_key") || strings.Contains(err.Error(), "notakey") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLoadConfigRefusesAReadableFileWithAMachineKey(t *testing.T) {
+	g := writeCLIConfig(t, 0o644, "machine_key = \"sock_mk_dev_secret\"\n")
+	if _, err := LoadConfig(g, nil); err == nil || !strings.Contains(err.Error(), "chmod 600") || strings.Contains(err.Error(), "secret\"") {
+		t.Fatalf("err = %v", err)
+	}
+}

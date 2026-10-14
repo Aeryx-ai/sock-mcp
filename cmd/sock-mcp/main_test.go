@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -453,5 +454,38 @@ func TestMachineKeyKeepsEachHubsPuppetApart(t *testing.T) {
 	defer b.mu.Unlock()
 	if len(b.creates) != 1 {
 		t.Fatalf("hub B created %v: it reused hub A's cached puppet", b.creates)
+	}
+}
+
+// sock-cli-qb6: Codex starts sock-mcp with neither SOCK_TOKEN nor
+// CLAUDE_PROJECT_DIR; the config file's machine_key and the working directory
+// still give it the project's own puppet.
+func TestFileMachineKeyRunsAsTheWorkingDirectorysPuppet(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	cfgHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cfgHome, "sock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf("url = %q\nmachine_key = \"sock_mk_dev_machinesecret\"\npuppet_token = \"sock_pt_shared\"\n", base("SOCK_URL"))
+	if err := os.WriteFile(filepath.Join(cfgHome, "sock", "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proj := filepath.Join(t.TempDir(), "codexproj")
+	if err := os.Mkdir(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(proj)
+	env := map[string]string{"XDG_CONFIG_HOME": cfgHome, "XDG_STATE_HOME": filepath.Join(t.TempDir(), "state"), "HOME": t.TempDir()}
+	handshake(t, []string{"--outbound-only"}, func(k string) string { return env[k] })
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.creates) != 1 || !strings.HasPrefix(f.creates[0], "codexproj on ") || f.createAuth != "Bearer sock_mk_dev_machinesecret" {
+		t.Fatalf("creates %v as %q", f.creates, f.createAuth)
+	}
+	for _, a := range f.auths {
+		if a != "Bearer sock_pt_projdev_secret" {
+			t.Fatalf("a call went out as %q", a)
+		}
 	}
 }

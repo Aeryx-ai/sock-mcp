@@ -16,7 +16,7 @@ Create a puppet in the sock app, copy its token, and register the server with yo
 
 ## Messaging the owner
 
-Background sessions never message the owner. `sock_send` without `conversation_id` (NotifyOwner) is refused with a `permanent:` error and nothing reaches the hub, unless this session is the owner's digest channel. Replies, `sock_send` with a `conversation_id`, always go through.
+`sock_send` without `conversation_id` (NotifyOwner) is refused with a `permanent:` error and nothing reaches the hub, unless this session is the owner's digest channel. `sock_send` with a `conversation_id` always goes through, the owner's direct conversation included: a model that finds that conversation with `sock_list_conversations` can post into it from any session. The control there is the hub's rate limit on puppet posts into the owner's direct (ADR 20), per puppet and per owner, which answers `RATE_LIMITED` with `Retry-After`.
 
 `SOCK_MCP_DIGEST_CHANNEL=1`: this session is the owner's digest channel; set only in an operator-configured session. Only exactly `1` counts. `sock-mcp` reads it once at start from its own environment and removes it, so no child process inherits it; no tool argument, message text or config file field turns it on. Set it in that one server's own `env` block, not in the agent's environment, where every session the agent starts would inherit it.
 

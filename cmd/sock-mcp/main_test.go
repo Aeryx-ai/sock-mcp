@@ -668,7 +668,7 @@ func digestSession(t *testing.T, env map[string]string) (mcp.Connection, *fakeSo
 	return peer, f
 }
 
-// Product rule: background sessions never message the owner. Only an
+// Product rule: background sessions never NotifyOwner. Only an
 // operator-configured digest channel session, SOCK_MCP_DIGEST_CHANNEL exactly
 // "1", may send without a conversation; no session signal stands in for it.
 func TestOwnerMessagesNeedTheDigestChannel(t *testing.T) {

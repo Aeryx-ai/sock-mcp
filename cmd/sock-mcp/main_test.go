@@ -566,3 +566,30 @@ func TestNoProjectWithoutAPuppetTokenFails(t *testing.T) {
 		})
 	}
 }
+
+// one source, never a mix: a machine key from SOCK_TOKEN never falls back to
+// the file's puppet_token (and its url), it fails
+func TestEnvMachineKeyWithNoProjectDoesNotReadTheFile(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	fileEnv := codexEnv(t, base, "puppet_token = \"sock_pt_shared\"\n", mkdir(t, filepath.Join(t.TempDir(), "bare")), "")
+	getenv := func(k string) string {
+		switch k {
+		case "SOCK_TOKEN":
+			return "sock_mk_dev_machinesecret"
+		case "SOCK_URL":
+			return base("SOCK_URL")
+		}
+		return fileEnv(k)
+	}
+	cfg, err := sockclient.LoadConfig(getenv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := projectPuppet(t.Context(), cfg, getenv, io.Discard); err == nil || !strings.HasPrefix(err.Error(), "no project directory") {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if len(f.creates) != 0 {
+		t.Fatalf("minted %v", f.creates)
+	}
+}

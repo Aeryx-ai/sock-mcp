@@ -66,6 +66,10 @@ func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) s
 		if err != nil {
 			return cfg, fmt.Errorf("project puppet: %w", err)
 		}
+		if why != "" && strings.TrimSpace(getenv("SOCK_TOKEN")) != "" {
+			// one source, never a mix: an env key never falls back to the file
+			return cfg, fmt.Errorf("no project directory: %s; set CLAUDE_PROJECT_DIR or start sock-mcp in the project's repository", why)
+		}
 		if why != "" {
 			fb, path, ok, err := sockclient.FilePuppetConfig(getenv)
 			if err != nil {

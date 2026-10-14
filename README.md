@@ -22,6 +22,8 @@ Create a puppet in the sock app, copy its token, and register the server with yo
 
 `sock-mcp --outbound-only` serves only `sock_whoami`, `sock_list_conversations` and `sock_send`, for an agent that runs beside `sock listen` (which owns the deliveries) or in a host that cannot filter tools. It cannot be combined with `--channel`. The server's instructions tell the model the inbound tools are absent. Details: [docs/specs/tools.md](docs/specs/tools.md).
 
+With `--channel` the server offers MCP protocol versions only up to 2025-11-25. Claude Code 2.1.292 and later negotiates the newest revision a stdio server offers, and a channel server on 2026-07-28 is not registered as a channel (no delivery path); the earlier handshake is. The cap lifts when Claude Code's changelog adds channel delivery on 2026-07-28.
+
 ## Claude Code channel
 
 `sock-mcp --channel` pushes messages from your puppet's owner into the running session. Only the owner (and ids in `SOCK_CHANNEL_ALLOW`) can reach Claude this way. Needs `--dangerously-load-development-channels` during the research preview. Details: [docs/specs/tools.md](docs/specs/tools.md).

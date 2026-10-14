@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -257,5 +258,93 @@ func TestOutboundOnlyInstructionsSayInboundIsAbsent(t *testing.T) {
 	ins, _ := init["instructions"].(string)
 	if !strings.Contains(ins, "sock_fetch") || !strings.Contains(ins, "outbound only") {
 		t.Fatalf("instructions = %q", ins)
+	}
+}
+
+// discoverVersions asks a freshly started server, before any initialize as
+// Claude Code does, what protocol versions it offers (server/discover, the
+// 2026-07-28 revision's handshake).
+func discoverVersions(t *testing.T, args []string) []string {
+	t.Helper()
+	ct, st := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	getenv := serve(t, &fakeSock{})
+	go func() { _ = run(ctx, args, getenv, io.Discard, st) }()
+	peer, err := ct.Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	if err := peer.Write(ctx, rpc(t, 3, "server/discover", map[string]any{"_meta": map[string]any{
+		"io.modelcontextprotocol/protocolVersion":    "2026-07-28",
+		"io.modelcontextprotocol/clientInfo":         map[string]any{"name": "t", "version": "1"},
+		"io.modelcontextprotocol/clientCapabilities": map[string]any{},
+	}})); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		m, err := peer.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, ok := m.(*jsonrpc.Response)
+		if !ok {
+			continue
+		}
+		if resp.Error != nil {
+			// A server that does not offer the requested revision answers with
+			// the versions it does offer, which is how a client falls back.
+			var we *jsonrpc.Error
+			if errors.As(resp.Error, &we) && we.Code == -32022 {
+				var data struct {
+					Supported []string `json:"supported"`
+				}
+				if err := json.Unmarshal(we.Data, &data); err != nil {
+					t.Fatal(err)
+				}
+				return data.Supported
+			}
+			t.Fatalf("server/discover: %v", resp.Error)
+		}
+		var res struct {
+			SupportedVersions []string `json:"supportedVersions"`
+		}
+		if err := json.Unmarshal(resp.Result, &res); err != nil {
+			t.Fatal(err)
+		}
+		return res.SupportedVersions
+	}
+}
+
+// integrations-pvq: Claude Code registers a channel only on the legacy
+// handshake. A server that offers revision 2026-07-28 in server/discover gets
+// the new handshake and loses channel delivery, so --channel caps the offer.
+func TestChannelOffersNoRevisionFromTheNewHandshake(t *testing.T) {
+	got := discoverVersions(t, []string{"--channel"})
+	if len(got) == 0 {
+		t.Fatal("no versions offered")
+	}
+	for _, v := range got {
+		if v >= "2026-07-28" {
+			t.Fatalf("--channel offers %s: %v", v, got)
+		}
+	}
+	if !slices.Contains(got, "2025-11-25") {
+		t.Fatalf("--channel dropped the legacy revision: %v", got)
+	}
+}
+
+func TestWithoutChannelTheNewRevisionIsStillOffered(t *testing.T) {
+	got := discoverVersions(t, nil)
+	if !slices.ContainsFunc(got, func(v string) bool { return v >= "2026-07-28" }) {
+		t.Fatalf("offered %v", got)
+	}
+}
+
+func TestChannelInitializeStillNegotiatesTheLegacyRevision(t *testing.T) {
+	_, init := handshake(t, []string{"--channel"}, serve(t, &fakeSock{}))
+	if v, _ := init["protocolVersion"].(string); v == "" || v >= "2026-07-28" {
+		t.Fatalf("protocolVersion = %q", v)
 	}
 }

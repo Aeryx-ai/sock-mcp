@@ -25,6 +25,26 @@ import (
 
 var version = "dev"
 
+// newHandshakeRevision is the first MCP revision whose handshake (server/discover)
+// Claude Code does not deliver channel messages on.
+const newHandshakeRevision = "2026-07-28"
+
+// legacyHandshakeVersions is every protocol version the SDK supports before
+// newHandshakeRevision. Claude Code 2.1.292 and later negotiates the newest
+// revision a stdio server offers, and a server on 2026-07-28 is not registered
+// as a channel; offering only the earlier ones makes it use the handshake that
+// has a channel delivery path. Lift this when Claude Code's changelog adds
+// channel delivery on 2026-07-28 (integrations-pvq).
+func legacyHandshakeVersions() []string {
+	var out []string
+	for _, v := range mcp.SupportedProtocolVersions() {
+		if v < newHandshakeRevision {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // outboundInstructions tells the model the inbound tools are absent on purpose,
 // so it does not go looking for them.
 const outboundInstructions = "This server is outbound only: it has sock_send, sock_whoami and sock_list_conversations. " +
@@ -58,6 +78,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stderr 
 	opts := &mcp.ServerOptions{}
 	if *outbound {
 		opts.Instructions = outboundInstructions
+	}
+	if *channelMode {
+		opts.SupportedProtocolVersions = legacyHandshakeVersions()
 	}
 	var ch *channel.Channel
 	tr := &channel.Transport{Inner: transport}

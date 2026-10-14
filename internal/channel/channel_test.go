@@ -13,6 +13,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
@@ -289,5 +290,45 @@ func TestTransportPushWritesNotification(t *testing.T) {
 	}
 	if err := json.Unmarshal(req.Params, &p); err != nil || p.Content != "hello" || p.Meta["message_id"] != "m1" {
 		t.Fatalf("params = %s (%v)", req.Params, err)
+	}
+}
+
+// A read marker (ADR 9), an event with no kind set and a kind from a newer
+// contract (field 99, unknown to this build) are passed over: nothing is
+// pushed or acked for them, the stream stays up and the message after them
+// arrives.
+func TestSkipsReadMarkersAndUnknownEventsOnTheSameStream(t *testing.T) {
+	future := &sockv1.SubscribeResponse{}
+	future.ProtoReflect().SetUnknown(protowire.AppendBytes(protowire.AppendTag(nil, 99, protowire.BytesType), []byte("x")))
+	send := sendAll(
+		&sockv1.SubscribeResponse{Event: &sockv1.SubscribeResponse_ReadMarker{ReadMarker: &sockv1.ReadMarker{ConversationId: "c1", ReadThroughSeq: 7}}},
+		&sockv1.SubscribeResponse{},
+		future,
+		msg("m1", owner, "after"),
+	)
+	held := func(ctx context.Context, s *connect.ServerStream[sockv1.SubscribeResponse]) error {
+		if err := send(ctx, s); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	}
+	f := &fake{scripts: []script{held}}
+	ch, got := setup(t, f)
+	// an event read as an empty message would have no sender: allowing ""
+	// makes that mistake a push, not a silent drop
+	ch.Allow[""] = true
+	cancel, done := run(ch)
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.acked) == 1 })
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(*got) != 1 || (*got)[0].Content != "after" || f.conns != 1 || len(f.events) != 2 || f.events[0] != "push:m1" || f.events[1] != "ack:m1" {
+		t.Fatalf("pushed %v, events %v, conns %d", *got, f.events, f.conns)
 	}
 }

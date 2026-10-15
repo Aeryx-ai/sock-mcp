@@ -2,9 +2,11 @@ package tools_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -568,5 +570,36 @@ func TestReplyAcksInBatchesTheHubTakes(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.acked) != 3 || len(f.acked[0]) != 500 || len(f.acked[2]) != 201 {
 		t.Fatalf("ack batches %d", len(f.acked))
+	}
+}
+
+// Policy.Replied hears of every message actually posted, by the conversation
+// the hub put it in, so a headless runner can tell a reply went out. A refused
+// or failed send is not a reply.
+func TestRepliedHearsOnlyOfPostedMessages(t *testing.T) {
+	var got []string
+	record := func(conv string) { got = append(got, conv) }
+
+	structured(t, call(t, startWith(t, &fake{}, tools.Policy{Replied: record}), "sock_send", map[string]any{"text": "hi", "conversation_id": "c9"}))
+	if !slices.Equal(got, []string{"c1"}) { // the fake's hub says c1
+		t.Fatalf("after a reply: %v", got)
+	}
+
+	got = nil
+	structured(t, call(t, startWith(t, &fake{}, tools.Policy{NotifyOwner: true, Replied: record}), "sock_send", map[string]any{"text": "done"}))
+	if !slices.Equal(got, []string{"c1"}) {
+		t.Fatalf("after a message to the owner: %v", got)
+	}
+
+	got = nil
+	res := call(t, startWith(t, &fake{}, tools.Policy{Replied: record}), "sock_send", map[string]any{"text": "unprompted"})
+	if !res.IsError || len(got) != 0 {
+		t.Fatalf("a refused owner message was recorded: %v (error=%v)", got, res.IsError)
+	}
+
+	got = nil
+	res = call(t, startWith(t, &fake{sendErr: connect.NewError(connect.CodePermissionDenied, errors.New("no"))}, tools.Policy{Replied: record}), "sock_send", map[string]any{"text": "hi", "conversation_id": "c9"})
+	if !res.IsError || len(got) != 0 {
+		t.Fatalf("a failed send was recorded: %v (error=%v)", got, res.IsError)
 	}
 }

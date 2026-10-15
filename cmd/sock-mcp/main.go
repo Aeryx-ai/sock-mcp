@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 
 	"github.com/guygrigsby/sock-mcp/internal/channel"
+	"github.com/guygrigsby/sock-mcp/internal/replies"
 	"github.com/guygrigsby/sock-mcp/sockclient"
 	"github.com/guygrigsby/sock-mcp/tools"
 )
@@ -93,6 +95,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, getenv func(string) string, digest bool, stderr io.Writer, transport mcp.Transport) error {
+	if len(args) > 0 && args[0] == "replied" {
+		return replied(args[1:], getenv, stderr)
+	}
 	fs := flag.NewFlagSet("sock-mcp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	channelMode := fs.Bool("channel", false, "also push inbound messages to a Claude Code session (claude/channel)")
@@ -118,6 +123,14 @@ func run(ctx context.Context, args []string, getenv func(string) string, digest 
 	var ch *channel.Channel
 	tr := &channel.Transport{Inner: transport}
 	policy := tools.Policy{NotifyOwner: digest}
+	if dir, err := replies.Dir(getenv); err == nil {
+		// best effort: the send already posted, so a failed record is only logged
+		policy.Replied = func(conversationID string) {
+			if err := replies.Record(dir, conversationID, time.Now()); err != nil {
+				_, _ = fmt.Fprintln(stderr, "sock-mcp:", err)
+			}
+		}
+	}
 	if *channelMode {
 		me, allow, err := allowlist(ctx, client, getenv)
 		if err != nil {
@@ -195,3 +208,39 @@ func allowlist(ctx context.Context, c *sockclient.Client, getenv func(string) st
 	}
 	return me.GetId(), allow, nil
 }
+
+// replied is `sock-mcp replied --conversation <id> --since <unix seconds>`:
+// exit 0 when a send posted in that conversation at or after --since, an
+// error otherwise. A headless runner calls it after the agent exits, so a
+// message is acknowledged only once its reply went out.
+func replied(args []string, getenv func(string) string, stderr io.Writer) error {
+	fs := flag.NewFlagSet("sock-mcp replied", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	conv := fs.String("conversation", "", "conversation id the reply belongs in")
+	since := fs.String("since", "", "unix time in seconds (fractions allowed): a reply at or after it counts")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *conv == "" || *since == "" {
+		return errors.New("replied: --conversation and --since are required")
+	}
+	secs, err := strconv.ParseFloat(*since, 64)
+	if err != nil || secs < 0 {
+		return fmt.Errorf("replied: --since must be unix seconds, got %q", *since)
+	}
+	dir, err := replies.Dir(getenv)
+	if err != nil {
+		return err
+	}
+	ok, err := replies.Since(dir, *conv, time.Unix(0, int64(secs*1e9)))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errNoReply
+	}
+	return nil
+}
+
+// errNoReply is replied's answer when nothing was posted.
+var errNoReply = errors.New("no reply was posted in that conversation since then")

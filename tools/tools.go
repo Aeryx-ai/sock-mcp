@@ -34,6 +34,10 @@ type Policy struct {
 	NotifyOwner bool
 	// Acked, when set, is told of message ids once the hub has acked them.
 	Acked func(ids ...string)
+	// Replied, when set, is told the conversation of every message a send
+	// actually posted (not a refused or failed one): the record a headless
+	// runner reads to know the agent answered.
+	Replied func(conversationID string)
 }
 
 // Register adds every sock tool to s: the consuming surface, whose sock_send
@@ -263,6 +267,9 @@ func (h *handlers) send(ctx context.Context, _ *mcp.CallToolRequest, in SendIn) 
 	})
 	if err != nil {
 		return nil, Message{}, err
+	}
+	if h.p.Replied != nil {
+		h.p.Replied(m.GetConversationId())
 	}
 	// Only ids the model names are acked: it can name a message only if it
 	// saw it, which a channel push alone never proves. The reply posted, so

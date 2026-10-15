@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -860,4 +861,44 @@ func TestHostThatNeverActsGetsAtMostFivePushesAndNoAck(t *testing.T) {
 		t.Fatalf("pushed %d times over %d restarts, want %d", pushes, channel.MaxPushes+2, channel.MaxPushes)
 	}
 	strangerOnly(t, f.acked(), "though the host never acted")
+}
+
+// `sock-mcp replied` is how a headless runner learns that the agent it woke
+// actually answered: a send that posted is recorded, and the check reads it.
+func TestRepliedReportsAPostedSend(t *testing.T) {
+	f := &fakeSock{}
+	getenv := serve(t, f)
+	peer, _ := handshake(t, []string{"--outbound-only"}, getenv)
+	replied := func(conv string, since time.Time) error {
+		return run(t.Context(), []string{"replied", "--conversation", conv, "--since", strconv.FormatFloat(float64(since.UnixNano())/1e9, 'f', 3, 64)}, getenv, false, io.Discard, &mcp.StdioTransport{})
+	}
+	start := time.Now().Add(-time.Second)
+	if err := replied("c1", start); err == nil {
+		t.Fatal("nothing was sent yet: replied must fail")
+	}
+	if !sendTool(t, peer, map[string]any{"text": "answer", "conversation_id": "c1"}) {
+		t.Fatal("send failed")
+	}
+	if err := replied("c1", start); err != nil {
+		t.Fatalf("a reply was posted: %v", err)
+	}
+	if err := replied("c2", start); err == nil {
+		t.Fatal("another conversation's reply counted")
+	}
+	if err := replied("c1", time.Now().Add(time.Hour)); err == nil {
+		t.Fatal("a reply before --since counted")
+	}
+}
+
+func TestRepliedRejectsBadArguments(t *testing.T) {
+	getenv := serve(t, &fakeSock{})
+	for name, args := range map[string][]string{
+		"no conversation": {"replied", "--since", "0"},
+		"no since":        {"replied", "--conversation", "c1"},
+		"bad since":       {"replied", "--conversation", "c1", "--since", "yesterday"},
+	} {
+		if err := run(t.Context(), args, getenv, false, io.Discard, &mcp.StdioTransport{}); err == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
 }

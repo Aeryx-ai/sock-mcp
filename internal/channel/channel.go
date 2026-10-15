@@ -20,8 +20,13 @@ import (
 const (
 	defaultIdle = 60 * time.Second // two missed 30s heartbeats
 	backoffBase = time.Second
-	backoffMax  = time.Minute
-	seenCap     = 10_000
+	// backoffMax tops out the wait between stream attempts: short on purpose,
+	// so a hub deploy or restart costs the channel seconds of missed pushes.
+	backoffMax = 5 * time.Second
+	// maxRetryAfter bounds a server-sent Retry-After, otherwise honored in
+	// full: reconnecting sooner is what the header says not to do.
+	maxRetryAfter = time.Hour
+	seenCap       = 10_000
 )
 
 // Instructions tell Claude what channel events are and how to answer them.
@@ -96,12 +101,13 @@ func (c *Channel) Run(ctx context.Context) error {
 		if progressed {
 			delay = backoffBase
 		}
-		wait := delay
+		wait := jitter(delay)
 		if ra, ok := client.RetryAfter(err, time.Now()); ok {
-			wait = min(max(ra, wait), backoffMax)
+			// a floor: the jitter applies to the backoff only
+			wait = min(max(ra, wait), maxRetryAfter)
 		}
 		c.Log.Warn("sock stream ended, reconnecting", "in", wait, "err", describe(err))
-		if serr := sleep(ctx, jitter(wait)); serr != nil {
+		if serr := sleep(ctx, wait); serr != nil {
 			return nil
 		}
 		delay = min(delay*2, backoffMax)

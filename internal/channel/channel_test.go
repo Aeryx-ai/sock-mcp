@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -565,5 +566,63 @@ func TestCountsDirIgnoresARelativeStateHome(t *testing.T) {
 	env = map[string]string{}
 	if _, err := CountsDir(func(k string) string { return env[k] }, "acc"); err == nil {
 		t.Fatal("no home accepted")
+	}
+}
+
+// The backoff tops out at 5s, so a hub restart costs the channel seconds, not
+// a minute of missed pushes.
+func TestReconnectBackoffTopsOutAtFiveSeconds(t *testing.T) {
+	fail := func(context.Context, *connect.ServerStream[sockv1.SubscribeResponse]) error {
+		return connect.NewError(connect.CodeUnavailable, nil)
+	}
+	f := &fake{scripts: []script{fail, fail, fail, fail, fail, fail, fail, sendAll(msg("m1", owner, "x"))}}
+	ch, got := setup(t, f)
+	var mu sync.Mutex
+	var waits []time.Duration
+	ch.Sleep = func(_ context.Context, d time.Duration) error {
+		mu.Lock()
+		waits = append(waits, d)
+		mu.Unlock()
+		return nil
+	}
+	cancel, done := run(ch)
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { return pushes(got, f) == 1 })
+	mu.Lock()
+	defer mu.Unlock()
+	s := time.Second
+	if want := []time.Duration{s, 2 * s, 4 * s, 5 * s, 5 * s, 5 * s, 5 * s}; len(waits) < len(want) || !slices.Equal(waits[:len(want)], want) {
+		t.Fatalf("waits = %v, want %v", waits, want)
+	}
+}
+
+// A Retry-After is a floor on the reconnect, not a hint the jitter may cut:
+// with jitter at its minimum (half), the wait is still the full Retry-After.
+func TestRetryAfterIsNeverShortenedByJitterOrCap(t *testing.T) {
+	limited := func(ra string) script {
+		return func(context.Context, *connect.ServerStream[sockv1.SubscribeResponse]) error {
+			e := connect.NewError(connect.CodeResourceExhausted, nil)
+			e.Meta().Set("Retry-After", ra)
+			return e
+		}
+	}
+	f := &fake{scripts: []script{limited("40"), limited("600"), sendAll(msg("m1", owner, "x"))}}
+	ch, got := setup(t, f)
+	ch.Jitter = func(d time.Duration) time.Duration { return d / 2 }
+	var mu sync.Mutex
+	var waits []time.Duration
+	ch.Sleep = func(_ context.Context, d time.Duration) error {
+		mu.Lock()
+		waits = append(waits, d)
+		mu.Unlock()
+		return nil
+	}
+	cancel, done := run(ch)
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { return pushes(got, f) == 1 })
+	mu.Lock()
+	defer mu.Unlock()
+	if len(waits) < 2 || waits[0] < 40*time.Second || waits[1] < 10*time.Minute {
+		t.Fatalf("waits = %v, want at least 40s then 10m", waits)
 	}
 }

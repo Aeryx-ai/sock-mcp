@@ -60,6 +60,17 @@ func (f *Server) handle(method string, params json.RawMessage) (any, *RPCError) 
 			return map[string]any{"data": f.Threads[:half], "nextCursor": "page2"}, nil
 		}
 		return map[string]any{"data": f.Threads[half:], "nextCursor": nil}, nil
+	case "thread/read":
+		var p struct {
+			ThreadID string `json:"threadId"`
+		}
+		_ = json.Unmarshal(params, &p)
+		for _, t := range f.Threads {
+			if t.ID == p.ThreadID {
+				return map[string]any{"thread": t}, nil
+			}
+		}
+		return nil, &RPCError{Code: -32600, Message: "no thread"}
 	case "thread/loaded/list":
 		return map[string]any{"data": f.Loaded, "nextCursor": nil}, nil
 	case "thread/resume":

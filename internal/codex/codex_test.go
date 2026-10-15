@@ -230,19 +230,16 @@ func TestDuplicateInAnotherSessionOfTheProject(t *testing.T) {
 	}
 }
 
-// The list asks for interactive sources by name, not by the daemon's default.
-func TestListNamesItsSourceKinds(t *testing.T) {
+// thread/list leaves out a loaded thread with no turn yet (a TUI just
+// opened); thread/read of each loaded thread does not.
+func TestLoadedThreadWithoutATurnCounts(t *testing.T) {
 	p := projectDir(t)
-	f := &codextest.Server{Threads: []codextest.Thread{{ID: "s", Cwd: p, UpdatedAt: 1}}, Loaded: []string{"s"}}
-	if r := inject(t, codextest.Serve(t, f), p, writeAsk(t, "")); r.code != 0 {
-		t.Fatalf("got %+v (an empty first page with a cursor must not end the list)", r)
+	f := &codextest.Server{Threads: []codextest.Thread{{ID: "fresh", Cwd: p, UpdatedAt: 1}}, Loaded: []string{"fresh"}}
+	if r := inject(t, codextest.Serve(t, f), p, writeAsk(t, "")); r.code != 0 || r.stdout != "accepted session=fresh turn=turn-1\n" {
+		t.Fatalf("got %+v", r)
 	}
-	var lp struct {
-		SourceKinds []string `json:"sourceKinds"`
-	}
-	_ = json.Unmarshal(f.Params("thread/list"), &lp)
-	if strings.Join(lp.SourceKinds, ",") != "cli,vscode" {
-		t.Fatalf("sourceKinds %v", lp.SourceKinds)
+	if f.Called("thread/list") {
+		t.Fatal("searched thread/list, which misses threads with no turn")
 	}
 }
 

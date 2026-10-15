@@ -1198,10 +1198,10 @@ func TestCodexInboundNeverMints(t *testing.T) {
 		return env(k)
 	})
 	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && !d.Called("thread/list") {
+	for time.Now().Before(deadline) && !d.Called("thread/read") {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !d.Called("thread/list") {
+	if !d.Called("thread/read") {
 		t.Fatal("the listener never looked at the daemon")
 	}
 	time.Sleep(300 * time.Millisecond)

@@ -15,7 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
+	"slices"
 
 	"github.com/coder/websocket"
 
@@ -111,12 +111,12 @@ func (d Daemon) Projects(ctx context.Context) ([]string, error) {
 	}
 	seen := map[string]string{}
 	var out []string
-	err = c.listSessions(ctx, loaded, func(s session) {
-		if p := project(ctx, seen, s.Cwd); p != "" && !strings.Contains(strings.Join(out, "\x00")+"\x00", "\x00"+p+"\x00") {
+	c.listSessions(ctx, loaded, func(s session) {
+		if p := project(ctx, seen, s.Cwd); p != "" && !slices.Contains(out, p) {
 			out = append(out, p)
 		}
 	})
-	return out, err
+	return out, nil
 }
 
 // Inject hands r to a loaded session of r.Project: the asked session when it
@@ -179,10 +179,7 @@ func (in injection) run(ctx context.Context, c *rpc) (Outcome, string, string, s
 	if err != nil {
 		return Refused, "", "", "thread/loaded/list: " + err.Error()
 	}
-	sessions, err := in.candidates(ctx, c, loaded)
-	if err != nil {
-		return Refused, "", "", "thread/list: " + err.Error()
-	}
+	sessions := in.candidates(ctx, c, loaded)
 	session := in.choose(sessions)
 	if session == "" {
 		return NoSession, "", "", ""
@@ -222,60 +219,54 @@ type session struct {
 	Cwd          string  `json:"cwd"`
 	Ephemeral    bool    `json:"ephemeral"`
 	ThreadSource *string `json:"threadSource"`
+	Source       string  `json:"source"`
 	UpdatedAt    int64   `json:"updatedAt"`
 }
 
-// interactive are the thread sources a person types into: the TUI and the
-// Codex app both report vscode, the CLI cli.
+// interactive are the sources of threads a person types into: the TUI and
+// the Codex app both report vscode, the CLI cli.
 var interactive = []string{"cli", "vscode"}
 
 // candidates are the loaded interactive sessions of the project, as the
 // puppet sees it (client.Project): a nested repository is another project and
 // a linked worktree is this one. A session the daemon has not loaded is never
 // one: resuming it would not keep the settings it was started with.
-func (in injection) candidates(ctx context.Context, c *rpc, loaded map[string]bool) ([]session, error) {
+func (in injection) candidates(ctx context.Context, c *rpc, loaded map[string]bool) []session {
 	var out []session
 	seen := map[string]string{}
-	err := c.listSessions(ctx, loaded, func(s session) {
+	c.listSessions(ctx, loaded, func(s session) {
 		if p := project(ctx, seen, s.Cwd); p != "" && p == in.root {
 			out = append(out, s)
 		}
 	})
-	return out, err
+	return out
 }
 
-// listSessions calls fn for each loaded interactive session the daemon lists,
-// newest first: not ephemeral (title generation) and no other thread source.
-func (c *rpc) listSessions(ctx context.Context, loaded map[string]bool, fn func(session)) error {
-	var cursor *string
-	seen := 0
-	for seen < maxThreads {
-		params := map[string]any{"limit": 100, "sortKey": "updated_at", "sortDirection": "desc", "sourceKinds": interactive}
-		if cursor != nil {
-			params["cursor"] = *cursor
+// listSessions calls fn for each loaded interactive session: not ephemeral
+// (title generation), started by a person (source cli or vscode; the TUI and
+// the Codex app report vscode) and no other thread source. Each loaded thread
+// is read on its own: thread/list leaves out a thread with no turn yet.
+func (c *rpc) listSessions(ctx context.Context, loaded map[string]bool, fn func(session)) {
+	n := 0
+	for id := range loaded {
+		if n++; n > maxThreads {
+			return
 		}
-		var page struct {
-			Data       []session `json:"data"`
-			NextCursor *string   `json:"nextCursor"`
+		if !sessionRE.MatchString(id) {
+			continue
 		}
-		if err := c.call(ctx, "thread/list", params, &page); err != nil {
-			return err
+		var r struct {
+			Thread session `json:"thread"`
 		}
-		for _, s := range page.Data {
-			seen++
-			// thread/list leaves threadSource null on TUI threads; any value
-			// it does give must be "user"
-			if s.Ephemeral || (s.ThreadSource != nil && *s.ThreadSource != "user") || !sessionRE.MatchString(s.ID) || !loaded[s.ID] {
-				continue
-			}
-			fn(s)
+		if err := c.call(ctx, "thread/read", map[string]any{"threadId": id}, &r); err != nil {
+			continue // gone since the list; the rest still count
 		}
-		if page.NextCursor == nil || *page.NextCursor == "" {
-			return nil
+		s := r.Thread
+		if s.ID != id || s.Ephemeral || (s.ThreadSource != nil && *s.ThreadSource != "user") || (s.Source != "" && !slices.Contains(interactive, s.Source)) {
+			continue
 		}
-		cursor = page.NextCursor
+		fn(s)
 	}
-	return nil
 }
 
 // project is cwd's project, cached in seen; "" for a cwd that is gone or not

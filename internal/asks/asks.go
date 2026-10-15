@@ -18,6 +18,7 @@ import (
 var (
 	conversationRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	sessionRE      = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	secondsRE      = regexp.MustCompile(`^[0-9]{1,19}$`)
 )
 
 // Dir is ${XDG_STATE_HOME:-~/.local/state}/sock-integrations/codex-asks. A
@@ -70,4 +71,25 @@ func Record(dir, conversation, session string, at time.Time) error {
 		return fmt.Errorf("asks: %w", err)
 	}
 	return nil
+}
+
+// Read is the session that last posted in conversation, or "" when the record
+// is missing or not exactly one valid "<session> <seconds>" line.
+func Read(dir, conversation string) string {
+	if !conversationRE.MatchString(conversation) {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(dir, conversation))
+	if err != nil || len(b) > 256 {
+		return ""
+	}
+	line, ok := strings.CutSuffix(string(b), "\n")
+	if !ok || strings.Contains(line, "\n") {
+		return ""
+	}
+	f := strings.Split(line, " ")
+	if len(f) != 2 || !sessionRE.MatchString(f[0]) || !secondsRE.MatchString(f[1]) {
+		return ""
+	}
+	return f[0]
 }

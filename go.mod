@@ -10,7 +10,10 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 )
 
-require github.com/BurntSushi/toml v1.6.0 // indirect
+require (
+	github.com/BurntSushi/toml v1.6.0 // indirect
+	github.com/coder/websocket v1.8.14 // indirect
+)
 
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect

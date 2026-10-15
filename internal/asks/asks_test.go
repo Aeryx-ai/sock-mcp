@@ -3,6 +3,7 @@ package asks
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,5 +58,26 @@ func TestRecordRefusesBadValues(t *testing.T) {
 		if err := Record(dir, c[0], c[1], t0); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+func TestReadIgnoresAnythingButOneValidLine(t *testing.T) {
+	dir := t.TempDir()
+	if err := Record(dir, conv, "s1", t0); err != nil {
+		t.Fatal(err)
+	}
+	if got := Read(dir, conv); got != "s1" {
+		t.Fatalf("got %q", got)
+	}
+	for _, content := range []string{"bad id! 1\n", "\n", "a/b 1\n", strings.Repeat("x", 65) + " 1\n", "s1 1\nmore\n", "s1 1", "s1 x\n"} {
+		if err := os.WriteFile(filepath.Join(dir, conv), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := Read(dir, conv); got != "" {
+			t.Fatalf("%q read as %q", content, got)
+		}
+	}
+	if Read(dir, "../x") != "" || Read(t.TempDir(), conv) != "" {
+		t.Fatal("a bad conversation or a missing record read as a session")
 	}
 }

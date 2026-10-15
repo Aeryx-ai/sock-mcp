@@ -65,12 +65,12 @@
       "readOnlyHint": false,
       "title": "Send a message"
     },
-    "description": "Reply with a Markdown message (1 to 65536 bytes) in conversation_id, the conversation of a message you are answering. Without conversation_id it would go to this puppet's owner unprompted, which only the owner's digest channel session may do; elsewhere it is refused. Posts once even if the call is retried.",
+    "description": "Reply with a Markdown message (1 to 65536 bytes) in conversation_id, the conversation of a message you are answering. Without conversation_id it messages this puppet's owner, which only a session configured to message the owner may do; elsewhere it is refused. Posts once even if the call is retried.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "conversation_id": {
-          "description": "conversation to post in; omitting it messages the owner and is refused outside the owner's digest channel session",
+          "description": "conversation to post in; omitting it messages the owner, refused unless this session is configured to message the owner",
           "type": "string"
         },
         "text": {

@@ -30,7 +30,8 @@ const (
 // Policy is what this session's tools may do beyond replying.
 type Policy struct {
 	// NotifyOwner lets sock_send without a conversation_id message the owner.
-	// Only the owner's digest channel session sets it; the zero value refuses.
+	// Set only from the server's config (SOCK_MCP_MESSAGE_OWNER); the zero
+	// value refuses.
 	NotifyOwner bool
 	// Acked, when set, is told of message ids once the hub has acked them.
 	Acked func(ids ...string)
@@ -90,7 +91,7 @@ const (
 	whoamiTitle     = "Who am I"
 	sendTitle       = "Send a message"
 	sendDescription = "Reply with a Markdown message (1 to 65536 bytes) in conversation_id, the conversation of a message you are answering. " +
-		"Without conversation_id it would go to this puppet's owner unprompted, which only the owner's digest channel session may do; elsewhere it is refused. " +
+		"Without conversation_id it messages this puppet's owner, which only a session configured to message the owner may do; elsewhere it is refused. " +
 		"Posts once even if the call is retried."
 )
 
@@ -237,12 +238,12 @@ type SendIn struct {
 // since an outbound session owns no deliveries to ack.
 type OutboundSendIn struct {
 	Text           string `json:"text" jsonschema:"Markdown message body, 1 to 65536 bytes"`
-	ConversationID string `json:"conversation_id,omitempty" jsonschema:"conversation to post in; omitting it messages the owner and is refused outside the owner's digest channel session"`
+	ConversationID string `json:"conversation_id,omitempty" jsonschema:"conversation to post in; omitting it messages the owner, refused unless this session is configured to message the owner"`
 }
 
 // errNotifyOwner is sock_send's answer to a message for the owner from a
-// session that is not the owner's digest channel.
-var errNotifyOwner = errors.New("permanent: this session may not message the owner unprompted, so nothing was sent. " +
+// session not configured to message the owner.
+var errNotifyOwner = errors.New("permanent: this session is not configured to message the owner, so nothing was sent. " +
 	"To answer a message the owner sent you, reply with that message's conversation_id; do not look up a conversation to reach the owner some other way. " +
 	"To get the owner's attention, finish your turn: the sock plugin's hooks ask the owner when a person is at this session")
 

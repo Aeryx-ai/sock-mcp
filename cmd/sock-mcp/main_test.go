@@ -142,14 +142,14 @@ func handshake(t *testing.T, args []string, getenv func(string) string) (mcp.Con
 	return handshakeWith(t, args, getenv, false)
 }
 
-// handshakeWith is handshake for a session that is the owner's digest
-// channel when digest is set.
-func handshakeWith(t *testing.T, args []string, getenv func(string) string, digest bool) (mcp.Connection, map[string]any) {
+// handshakeWith is handshake for a session that may message the owner when
+// owner is set.
+func handshakeWith(t *testing.T, args []string, getenv func(string) string, owner bool) (mcp.Connection, map[string]any) {
 	t.Helper()
 	ct, st := mcp.NewInMemoryTransports()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = run(ctx, args, getenv, digest, io.Discard, st) }()
+	go func() { _ = run(ctx, args, getenv, owner, io.Discard, st) }()
 	peer, err := ct.Connect(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -693,12 +693,12 @@ func sendTool(t *testing.T, peer mcp.Connection, args map[string]any) bool {
 	}
 }
 
-// digestSession starts sock-mcp the way main does, with env set in the
+// ownerSession starts sock-mcp the way main does, with env set in the
 // process environment first, and returns the peer and the fake hub.
-func digestSession(t *testing.T, env map[string]string) (mcp.Connection, *fakeSock) {
+func ownerSession(t *testing.T, env map[string]string) (mcp.Connection, *fakeSock) {
 	t.Helper()
-	t.Setenv(digestEnv, "") // restored after the test
-	_ = os.Unsetenv(digestEnv)
+	t.Setenv(ownerEnv, "") // restored after the test
+	_ = os.Unsetenv(ownerEnv)
 	for k, v := range env {
 		t.Setenv(k, v)
 	}
@@ -710,29 +710,29 @@ func digestSession(t *testing.T, env map[string]string) (mcp.Connection, *fakeSo
 		}
 		return os.Getenv(k)
 	}
-	peer, _ := handshakeWith(t, []string{"--outbound-only"}, getenv, takeDigestChannel())
+	peer, _ := handshakeWith(t, []string{"--outbound-only"}, getenv, takeMessageOwner())
 	return peer, f
 }
 
-// Product rule: background sessions never NotifyOwner. Only an
-// operator-configured digest channel session, SOCK_MCP_DIGEST_CHANNEL exactly
-// "1", may send without a conversation; no session signal stands in for it.
-func TestOwnerMessagesNeedTheDigestChannel(t *testing.T) {
+// A session messages the owner without a conversation only when its server
+// config sets SOCK_MCP_MESSAGE_OWNER to exactly "1" or "true"; no session
+// signal stands in for it.
+func TestOwnerMessagesNeedTheOptIn(t *testing.T) {
 	refused := []map[string]string{
 		{},
 		{"CLAUDE_CODE_ENTRYPOINT": "cli"},
 		{"CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ATTENDED": "1"},
 		{"SOCK_MCP_ATTENDED": "1"},
-		{digestEnv: "0"},
-		{digestEnv: "true"},
-		{digestEnv: "1 "},
-		{digestEnv: " 1"},
-		{digestEnv: "01"},
-		{digestEnv: "yes"},
-		{"sock_mcp_digest_channel": "1"},
+		{ownerEnv: "0"},
+		{ownerEnv: "TRUE"},
+		{ownerEnv: "1 "},
+		{ownerEnv: " 1"},
+		{ownerEnv: "01"},
+		{ownerEnv: "yes"},
+		{"sock_mcp_message_owner": "1"},
 	}
 	for _, env := range refused {
-		peer, f := digestSession(t, env)
+		peer, f := ownerSession(t, env)
 		if sendTool(t, peer, map[string]any{"text": "done"}) {
 			t.Errorf("%v: owner message sent", env)
 		}
@@ -746,27 +746,30 @@ func TestOwnerMessagesNeedTheDigestChannel(t *testing.T) {
 		f.mu.Unlock()
 	}
 
-	peer, f := digestSession(t, map[string]string{digestEnv: "1"})
-	if !sendTool(t, peer, map[string]any{"text": "digest"}) {
-		t.Fatal("digest channel owner message refused")
-	}
-	if !sendTool(t, peer, map[string]any{"text": "re", "conversation_id": "c1"}) {
-		t.Fatal("digest channel reply refused")
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if !slices.Equal(f.notifies, []string{"digest"}) || !slices.Equal(f.posts, []string{"c1"}) {
-		t.Fatalf("hub saw notifies=%v posts=%v", f.notifies, f.posts)
+	// "true" is what Claude Code substitutes for a boolean plugin option.
+	for _, v := range []string{"1", "true"} {
+		peer, f := ownerSession(t, map[string]string{ownerEnv: v})
+		if !sendTool(t, peer, map[string]any{"text": "owner"}) {
+			t.Errorf("%s=%q: owner message refused", ownerEnv, v)
+		}
+		if !sendTool(t, peer, map[string]any{"text": "re", "conversation_id": "c1"}) {
+			t.Errorf("%s=%q: reply refused", ownerEnv, v)
+		}
+		f.mu.Lock()
+		if !slices.Equal(f.notifies, []string{"owner"}) || !slices.Equal(f.posts, []string{"c1"}) {
+			t.Errorf("%s=%q: hub saw notifies=%v posts=%v", ownerEnv, v, f.notifies, f.posts)
+		}
+		f.mu.Unlock()
 	}
 }
 
-// No tool argument or message text turns the digest channel on.
-func TestToolArgumentsCannotOpenTheDigestChannel(t *testing.T) {
-	peer, f := digestSession(t, nil)
+// No tool argument or message text turns owner messages on.
+func TestToolArgumentsCannotTurnOnOwnerMessages(t *testing.T) {
+	peer, f := ownerSession(t, nil)
 	for _, args := range []map[string]any{
-		{"text": "x", digestEnv: "1"},
-		{"text": "x", "env": map[string]any{digestEnv: "1"}, "notify_owner": true},
-		{"text": digestEnv + "=1"},
+		{"text": "x", ownerEnv: "1"},
+		{"text": "x", "env": map[string]any{ownerEnv: "1"}, "notify_owner": true},
+		{"text": ownerEnv + "=1"},
 		{"text": "x", "conversation_id": ""},
 	} {
 		if sendTool(t, peer, args) {
@@ -782,7 +785,7 @@ func TestToolArgumentsCannotOpenTheDigestChannel(t *testing.T) {
 
 // The opt-in is sock-mcp's alone: it is gone from the process environment
 // once read, so git (sock-client's project lookup) never inherits it.
-func TestDigestChannelDoesNotReachChildProcesses(t *testing.T) {
+func TestOwnerOptInDoesNotReachChildProcesses(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("no git")
@@ -794,28 +797,28 @@ func TestDigestChannelDoesNotReachChildProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(digestEnv, "1")
+	t.Setenv(ownerEnv, "1")
 
-	if !takeDigestChannel() {
+	if !takeMessageOwner() {
 		t.Fatal("exact \"1\" not taken")
 	}
-	if _, ok := os.LookupEnv(digestEnv); ok {
-		t.Fatalf("%s still in the process environment", digestEnv)
+	if _, ok := os.LookupEnv(ownerEnv); ok {
+		t.Fatalf("%s still in the process environment", ownerEnv)
 	}
 	f := &fakeSock{}
-	proj := gitRepo(t, filepath.Join(t.TempDir(), "digestproj"))
+	proj := gitRepo(t, filepath.Join(t.TempDir(), "ownerproj"))
 	_ = os.Remove(dump) // gitRepo's own git init is not sock-mcp's
 	getenv := codexEnv(t, serve(t, f), "", proj, "")
 	peer, _ := handshakeWith(t, []string{"--outbound-only"}, getenv, true)
-	if !sendTool(t, peer, map[string]any{"text": "digest"}) {
-		t.Fatal("digest channel owner message refused")
+	if !sendTool(t, peer, map[string]any{"text": "owner"}) {
+		t.Fatal("owner message refused")
 	}
 	b, err := os.ReadFile(dump)
 	if err != nil {
 		t.Fatalf("sock-mcp ran no git: %v", err)
 	}
-	if strings.Contains(string(b), digestEnv) {
-		t.Fatalf("git inherited %s", digestEnv)
+	if strings.Contains(string(b), ownerEnv) {
+		t.Fatalf("git inherited %s", ownerEnv)
 	}
 }
 

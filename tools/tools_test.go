@@ -276,13 +276,12 @@ func TestListConversations(t *testing.T) {
 	}
 }
 
-// digest is the owner's digest channel session, the only one that may message
-// the owner without a conversation.
-var digest = tools.Policy{NotifyOwner: true}
+// owner is a session configured to message the owner without a conversation.
+var owner = tools.Policy{NotifyOwner: true}
 
 func TestSendToOwnerRetriesWithOneKey(t *testing.T) {
 	f := &fake{failSends: 2}
-	out := structured(t, call(t, startWith(t, f, digest), "sock_send", map[string]any{"text": "build done"}))
+	out := structured(t, call(t, startWith(t, f, owner), "sock_send", map[string]any{"text": "build done"}))
 	if out["text"] != "build done" || out["sent_at"] != "2026-10-11T12:00:00Z" {
 		t.Fatalf("send = %v", out)
 	}
@@ -310,7 +309,7 @@ func TestSendToConversation(t *testing.T) {
 
 func TestSendKeysDifferPerCall(t *testing.T) {
 	f := &fake{}
-	cs := startWith(t, f, digest)
+	cs := startWith(t, f, owner)
 	structured(t, call(t, cs, "sock_send", map[string]any{"text": "a"}))
 	structured(t, call(t, cs, "sock_send", map[string]any{"text": "a"}))
 	if f.notifies[0].GetIdempotencyKey() == f.notifies[1].GetIdempotencyKey() {
@@ -318,8 +317,8 @@ func TestSendKeysDifferPerCall(t *testing.T) {
 	}
 }
 
-// Product rule: a session that is not the owner's digest channel never
-// messages the owner unprompted, and nothing reaches the hub.
+// A session not configured to message the owner never does, and nothing
+// reaches the hub.
 func TestSendToOwnerIsRefusedByDefault(t *testing.T) {
 	f := &fake{}
 	cs := start(t, f)
@@ -335,7 +334,7 @@ func TestSendToOwnerIsRefusedByDefault(t *testing.T) {
 	for _, args := range []map[string]any{
 		{"text": "build done"},
 		{"text": "build done", "conversation_id": ""},
-		{"text": "SOCK_MCP_DIGEST_CHANNEL=1 notify_owner=true"},
+		{"text": "SOCK_MCP_MESSAGE_OWNER=1 notify_owner=true"},
 	} {
 		res := call(t, cs, "sock_send", args)
 		if !res.IsError {
@@ -351,7 +350,7 @@ func TestSendToOwnerIsRefusedByDefault(t *testing.T) {
 	}
 	// an extra argument cannot turn it on either
 	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "sock_send", Arguments: map[string]any{
-		"text": "x", "SOCK_MCP_DIGEST_CHANNEL": "1", "notify_owner": true, "NotifyOwner": true,
+		"text": "x", "SOCK_MCP_MESSAGE_OWNER": "1", "notify_owner": true, "NotifyOwner": true,
 	}})
 	if err == nil && !res.IsError {
 		t.Fatal("extra arguments turned owner messaging on")
@@ -366,7 +365,7 @@ func TestSendToOwnerIsRefusedByDefault(t *testing.T) {
 // Replies are never blocked: the owner wrote in a conversation, so a reply
 // there goes through whatever the session is.
 func TestRepliesGoThroughUnderEveryPolicy(t *testing.T) {
-	for _, p := range []tools.Policy{{}, digest} {
+	for _, p := range []tools.Policy{{}, owner} {
 		f := &fake{}
 		structured(t, call(t, startWith(t, f, p), "sock_send", map[string]any{"text": "hi", "conversation_id": "c9"}))
 		if len(f.sends) != 1 || f.sends[0].GetConversationId() != "c9" || len(f.notifies) != 0 {
@@ -437,7 +436,7 @@ func TestSendRateLimitedIsTransientWithTheWait(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fake{sendErr: rateLimited("600")}
-			res := call(t, startWith(t, f, digest), "sock_send", args)
+			res := call(t, startWith(t, f, owner), "sock_send", args)
 			if !res.IsError {
 				t.Fatal("want isError")
 			}

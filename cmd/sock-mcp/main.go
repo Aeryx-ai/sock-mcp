@@ -71,30 +71,33 @@ func puppetOptions(getenv func(string) string, stderr io.Writer) client.PuppetOp
 const outboundInstructions = "This server is outbound only: it has sock_send, sock_whoami and sock_list_conversations. " +
 	"There is no sock_fetch or sock_ack here; incoming messages are handled elsewhere, so do not look for them."
 
-// digestEnv marks the owner's digest channel session, the one session that
-// may message the owner without a conversation. An operator sets it in that
-// session's server config; nothing a model controls can.
-const digestEnv = "SOCK_MCP_DIGEST_CHANNEL"
+// ownerEnv lets this session message the owner without a conversation. It is
+// set in the server's config (the Claude Code plugin's message_owner option);
+// nothing a model controls can set it. The hub's owner-direct rate limit
+// (ADR 20) bounds what an opted-in session sends.
+const ownerEnv = "SOCK_MCP_MESSAGE_OWNER"
 
-// takeDigestChannel reports whether digestEnv is exactly "1" and removes it
+// takeMessageOwner reports whether ownerEnv is exactly "1" or "true" (what
+// Claude Code substitutes for a boolean plugin option) and removes it
 // from the process environment, so no child process (git, for one) inherits
 // it. main calls it once, before anything else runs.
-func takeDigestChannel() bool {
-	on := os.Getenv(digestEnv) == "1"
-	_ = os.Unsetenv(digestEnv)
+func takeMessageOwner() bool {
+	v := os.Getenv(ownerEnv)
+	on := v == "1" || v == "true"
+	_ = os.Unsetenv(ownerEnv)
 	return on
 }
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Getenv, takeDigestChannel(), os.Stderr, &mcp.StdioTransport{}); err != nil {
+	if err := run(ctx, os.Args[1:], os.Getenv, takeMessageOwner(), os.Stderr, &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintln(os.Stderr, "sock-mcp:", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string, getenv func(string) string, digest bool, stderr io.Writer, transport mcp.Transport) error {
+func run(ctx context.Context, args []string, getenv func(string) string, messageOwner bool, stderr io.Writer, transport mcp.Transport) error {
 	if len(args) > 0 && args[0] == "replied" {
 		return replied(args[1:], getenv, stderr)
 	}
@@ -127,7 +130,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, digest 
 	}
 	var ch *channel.Channel
 	tr := &channel.Transport{Inner: transport}
-	policy := tools.Policy{NotifyOwner: digest}
+	policy := tools.Policy{NotifyOwner: messageOwner}
 	if dir, err := replies.Dir(getenv); err == nil {
 		// best effort: the send already posted, so a failed record is only logged
 		policy.Replied = func(conversationID string) {

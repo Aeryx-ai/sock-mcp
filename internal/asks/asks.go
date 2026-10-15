@@ -59,7 +59,7 @@ func Record(dir, conversation, session string, at time.Time) error {
 	if err != nil {
 		return fmt.Errorf("asks: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := fmt.Fprintf(tmp, "%s %d\n", session, at.Unix()); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("asks: %w", err)

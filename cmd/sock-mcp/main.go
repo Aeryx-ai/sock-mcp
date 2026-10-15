@@ -169,11 +169,15 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	fs.SetOutput(stderr)
 	channelMode := fs.Bool("channel", false, "also push inbound messages to a Claude Code session (claude/channel)")
 	outbound := fs.Bool("outbound-only", false, "serve only sock_whoami, sock_list_conversations and sock_send (no sock_fetch or sock_ack)")
+	codexIn := fs.Bool("codex-inbound", false, "Codex plugin: put the owner's replies into loaded Codex sessions through the app-server daemon")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *outbound && *channelMode {
 		return errors.New("--outbound-only and --channel cannot be combined: the channel consumes deliveries")
+	}
+	if *codexIn && *channelMode {
+		return errors.New("--codex-inbound and --channel cannot be combined: both consume deliveries")
 	}
 	po := puppetOptions(getenv, stderr)
 	cfg, err := client.LoadPuppetConfig(po)
@@ -184,6 +188,15 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	}
 	if err != nil {
 		return err
+	}
+	if *codexIn {
+		if client.TokenKind(cfg.Token) != client.KindMachineKey {
+			_, _ = fmt.Fprintln(stderr, "sock-mcp:", errCodexInboundNeedsKey)
+		} else if l, err := newCodexInbound(cfg, getenv, stderr); err != nil {
+			_, _ = fmt.Fprintln(stderr, "sock-mcp: no Codex inbound:", err)
+		} else {
+			go l.Run(ctx)
+		}
 	}
 	var perCall *projectClients
 	if *outbound && perCallProject(cfg, getenv) {

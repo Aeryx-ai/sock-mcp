@@ -13,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 )
 
+// Thread is a thread as thread/list returns it.
 type Thread struct {
 	ID           string  `json:"id"`
 	Cwd          string  `json:"cwd"`
@@ -21,16 +22,17 @@ type Thread struct {
 	UpdatedAt    int64   `json:"updatedAt"`
 }
 
+// User is the threadSource of a person's thread.
 func User() *string { s := "user"; return &s }
 
-// fakeServer is the Codex app-server's control socket: JSON-RPC over a
+// Server is the Codex app-server's control socket: JSON-RPC over a
 // WebSocket upgrade on a Unix socket.
 type Server struct {
 	Threads   []Thread
 	Loaded    []string
 	ClientIDs map[string][]string // thread id -> user message clientIds
 	TurnErr   bool
-	// Notify are raw notifications sent to every client right after it connects.
+	// Notify are raw notifications sent to a client once it is initialized.
 	Notify []string
 
 	mu      sync.Mutex
@@ -128,9 +130,6 @@ func Serve(t *testing.T, f *Server) string {
 		ctx := r.Context()
 		// a notification first, which the client must skip
 		_ = c.Write(ctx, websocket.MessageText, []byte(`{"method":"thread/status/changed","params":{}}`))
-		for _, n := range f.Notify {
-			_ = c.Write(ctx, websocket.MessageText, []byte(n))
-		}
 		for {
 			_, b, err := c.Read(ctx)
 			if err != nil {
@@ -141,7 +140,15 @@ func Serve(t *testing.T, f *Server) string {
 				Method string          `json:"method"`
 				Params json.RawMessage `json:"params"`
 			}
-			if json.Unmarshal(b, &req) != nil || req.ID == nil {
+			if json.Unmarshal(b, &req) != nil {
+				continue
+			}
+			if req.ID == nil {
+				if req.Method == "initialized" {
+					for _, n := range f.Notify {
+						_ = c.Write(ctx, websocket.MessageText, []byte(n))
+					}
+				}
 				continue
 			}
 			res, rerr := f.handle(req.Method, req.Params)

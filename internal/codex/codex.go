@@ -33,15 +33,15 @@ var sessionRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 type Outcome int
 
 const (
-	// Accepted: turn/start took the reply; acknowledge it.
+	// Accepted means turn/start took the reply; acknowledge it.
 	Accepted Outcome = iota
-	// Duplicate: a session already holds it; acknowledge it.
+	// Duplicate means a session already holds it; acknowledge it.
 	Duplicate
-	// NoSession: no loaded session in the project; leave it pending.
+	// NoSession means no loaded session in the project; leave it pending.
 	NoSession
-	// Refused: the daemon answered with an error; leave it pending.
+	// Refused means the daemon answered with an error; leave it pending.
 	Refused
-	// Unavailable: no daemon to talk to; leave it pending.
+	// Unavailable means there is no daemon to talk to; leave it pending.
 	Unavailable
 )
 
@@ -130,6 +130,42 @@ func (d Daemon) Inject(ctx context.Context, r Reply) Result {
 	in := injection{root: r.Project, asked: r.Asked, messageID: r.MessageID, prompt: r.Prompt}
 	o, sess, turn, why := in.run(ctx, c)
 	return Result{Outcome: o, Session: sess, Turn: turn, Reason: why}
+}
+
+// Watch calls changed once connected and again each time the daemon starts a
+// thread or one goes idle (a turn ended, which may have made the project's
+// puppet), until ctx ends (nil) or the connection drops (the error). The
+// daemon sends thread/started to every connected client.
+func (d Daemon) Watch(ctx context.Context, changed func()) error {
+	c, err := dial(ctx, d.Socket, d.Version)
+	if err != nil {
+		return err
+	}
+	defer c.close()
+	changed()
+	for {
+		_, b, err := c.ws.Read(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var n struct {
+			Method string `json:"method"`
+			Params struct {
+				Status struct {
+					Type string `json:"type"`
+				} `json:"status"`
+			} `json:"params"`
+		}
+		if json.Unmarshal(b, &n) != nil {
+			continue
+		}
+		if n.Method == "thread/started" || (n.Method == "thread/status/changed" && n.Params.Status.Type == "idle") {
+			changed()
+		}
+	}
 }
 
 type injection struct {

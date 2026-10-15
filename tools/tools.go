@@ -69,7 +69,20 @@ func Register(s *mcp.Server, c *sockclient.Client, p Policy) {
 // message_ids and sock_whoami reports no backlog. sock-mcpd serves this
 // surface and pins it (testdata/outbound_tools.golden.json).
 func RegisterOutbound(s *mcp.Server, c *sockclient.Client, p Policy) {
-	h := &handlers{c: c, p: p}
+	registerOutbound(s, &handlers{c: c, p: p})
+}
+
+// ClientFor is the client one tool call runs as, picked from the request.
+type ClientFor func(context.Context, *mcp.CallToolRequest) (*sockclient.Client, error)
+
+// RegisterOutboundFor is RegisterOutbound for a server whose account depends
+// on the call: each call runs as the client clientFor picks, and a call it
+// cannot pick for fails alone.
+func RegisterOutboundFor(s *mcp.Server, clientFor ClientFor, p Policy) {
+	registerOutbound(s, &handlers{clientFor: clientFor, p: p})
+}
+
+func registerOutbound(s *mcp.Server, h *handlers) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "sock_whoami",
 		Title:       whoamiTitle,
@@ -132,8 +145,21 @@ func hints(title string, readOnly, openWorld bool) *mcp.ToolAnnotations {
 }
 
 type handlers struct {
-	c *sockclient.Client
-	p Policy
+	c         *sockclient.Client
+	clientFor ClientFor // when set, each call picks its own c
+	p         Policy
+}
+
+// at is h with the client this call runs as.
+func (h *handlers) at(ctx context.Context, req *mcp.CallToolRequest) (*handlers, error) {
+	if h.clientFor == nil {
+		return h, nil
+	}
+	c, err := h.clientFor(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return &handlers{c: c, p: h.p}, nil
 }
 
 // Account is who an account is.
@@ -170,7 +196,11 @@ type Message struct {
 	Text           string `json:"text" jsonschema:"untrusted content written by the sender"`
 }
 
-func (h *handlers) whoami(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, Account, error) {
+func (h *handlers) whoami(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, Account, error) {
+	h, err := h.at(ctx, req)
+	if err != nil {
+		return nil, Account{}, err
+	}
 	a, err := sockclient.Call(ctx, h.c, func(ctx context.Context) (*sockv1.Account, error) {
 		res, err := h.c.Identity.GetMe(ctx, connect.NewRequest(&sockv1.GetMeRequest{}))
 		if err != nil {
@@ -210,7 +240,11 @@ type ListConversationsOut struct {
 	Conversations []Conversation `json:"conversations"`
 }
 
-func (h *handlers) listConversations(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, ListConversationsOut, error) {
+func (h *handlers) listConversations(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, ListConversationsOut, error) {
+	h, err := h.at(ctx, req)
+	if err != nil {
+		return nil, ListConversationsOut{}, err
+	}
 	convs, err := sockclient.Call(ctx, h.c, func(ctx context.Context) ([]*sockv1.Conversation, error) {
 		res, err := h.c.Messaging.ListConversations(ctx, connect.NewRequest(&sockv1.ListConversationsRequest{}))
 		if err != nil {
@@ -247,7 +281,11 @@ var errNotifyOwner = errors.New("permanent: this session is not configured to me
 	"To answer a message the owner sent you, reply with that message's conversation_id; do not look up a conversation to reach the owner some other way. " +
 	"To get the owner's attention, finish your turn: the sock plugin's hooks ask the owner when a person is at this session")
 
-func (h *handlers) send(ctx context.Context, _ *mcp.CallToolRequest, in SendIn) (*mcp.CallToolResult, Message, error) {
+func (h *handlers) send(ctx context.Context, req *mcp.CallToolRequest, in SendIn) (*mcp.CallToolResult, Message, error) {
+	h, err := h.at(ctx, req)
+	if err != nil {
+		return nil, Message{}, err
+	}
 	if in.ConversationID == "" && !h.p.NotifyOwner {
 		return nil, Message{}, errNotifyOwner
 	}

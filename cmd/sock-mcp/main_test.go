@@ -950,3 +950,96 @@ func TestNoCredentialStartsAndEveryToolSaysToSignIn(t *testing.T) {
 		cancel()
 	}
 }
+
+// callTool calls a tool on peer with _meta and returns the raw result, or
+// fails on a JSON-RPC error.
+func callTool(t *testing.T, peer mcp.Connection, id float64, name string, meta map[string]any) map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	params := map[string]any{"name": name, "arguments": map[string]any{}}
+	if meta != nil {
+		params["_meta"] = meta
+	}
+	if err := peer.Write(ctx, rpc(t, id, "tools/call", params)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		m, err := peer.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, ok := m.(*jsonrpc.Response)
+		if !ok {
+			continue
+		}
+		if resp.Error != nil {
+			t.Fatalf("tools/call %s: %v", name, resp.Error)
+		}
+		var res map[string]any
+		if err := json.Unmarshal(resp.Result, &res); err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+}
+
+// sandboxMeta is the _meta Codex 0.162 puts on every tools/call to a server
+// that declares codex/sandbox-state-meta (probed live 2026-10-15).
+func sandboxMeta(dir string) map[string]any {
+	return map[string]any{"codex/sandbox-state-meta": map[string]any{"sandboxCwd": "file://" + dir}}
+}
+
+// integrations-b2g: a Codex plugin server starts in the plugin root, where a
+// machine key alone used to stop it. It starts, asks Codex for the session's
+// directory and runs each call as that project's puppet, as the hooks do.
+func TestPluginRootMachineKeyRunsEachCallAsTheSessionsProject(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
+	proj := gitRepo(t, filepath.Join(t.TempDir(), "codexproj"))
+	getenv := codexEnv(t, base, "", root, root)
+	peer, init := handshake(t, []string{"--outbound-only"}, getenv)
+	caps, _ := init["capabilities"].(map[string]any)
+	exp, _ := caps["experimental"].(map[string]any)
+	if _, ok := exp["codex/sandbox-state-meta"]; !ok {
+		t.Fatalf("capabilities %v do not ask Codex for the sandbox cwd", caps)
+	}
+	if _, ok := caps["tools"]; !ok {
+		t.Fatalf("capabilities %v lost tools", caps)
+	}
+	if res := callTool(t, peer, 2, "sock_whoami", sandboxMeta(proj)); res["isError"] == true {
+		t.Fatalf("whoami: %v", res)
+	}
+	callTool(t, peer, 3, "sock_whoami", sandboxMeta(proj))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.creates) != 1 || !strings.HasPrefix(f.creates[0], "codexproj on ") || f.createAuth != "Bearer sock_mk_dev_machinesecret" {
+		t.Fatalf("creates %v as %q", f.creates, f.createAuth)
+	}
+	if len(f.auths) != 2 {
+		t.Fatalf("auths %v", f.auths)
+	}
+	for _, a := range f.auths {
+		if a != "Bearer sock_pt_projdev_secret" {
+			t.Fatalf("a call went out as %q", a)
+		}
+	}
+}
+
+// Without a sandbox cwd there is no project: the call fails with what to do
+// and the server stays up for the next one.
+func TestPluginRootMachineKeyWithoutSandboxCwdFailsTheCallOnly(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
+	proj := gitRepo(t, filepath.Join(t.TempDir(), "codexproj"))
+	peer, _ := handshake(t, []string{"--outbound-only"}, codexEnv(t, base, "", root, root))
+	res := callTool(t, peer, 2, "sock_whoami", nil)
+	if res["isError"] != true || !strings.Contains(fmt.Sprint(res["content"]), "no project directory") {
+		t.Fatalf("got %v", res)
+	}
+	if res := callTool(t, peer, 3, "sock_whoami", sandboxMeta(proj)); res["isError"] == true {
+		t.Fatalf("server did not recover: %v", res)
+	}
+}

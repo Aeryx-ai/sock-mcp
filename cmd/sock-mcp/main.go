@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -53,6 +56,58 @@ func legacyHandshakeVersions() []string {
 // machine key becomes the token of this project's puppet (ADR 10).
 func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) string, stderr io.Writer) (client.Config, error) {
 	return client.ProjectPuppet(ctx, cfg, puppetOptions(getenv, stderr))
+}
+
+// sandboxStateMeta is the experimental capability that makes Codex put the
+// session's sandbox state, sandboxCwd among it, in every tools/call _meta.
+const sandboxStateMeta = "codex/sandbox-state-meta"
+
+// perCallProject reports whether this is a Codex plugin server holding a
+// machine key: it starts in the plugin root, so the project is known only
+// from each call's sandboxCwd.
+func perCallProject(cfg client.Config, getenv func(string) string) bool {
+	return client.TokenKind(cfg.Token) == client.KindMachineKey && getenv("PLUGIN_ROOT") != "" && getenv("CLAUDE_PROJECT_DIR") == ""
+}
+
+// projectClients runs each call as the puppet of the call's sandboxCwd,
+// minting it with the machine key the first time and reusing it after. A call
+// without one gets ProjectPuppet's answer for the plugin root.
+type projectClients struct {
+	key  client.Config
+	opts client.PuppetOptions
+
+	mu    sync.Mutex
+	byDir map[string]*sockclient.Client
+}
+
+func (p *projectClients) For(ctx context.Context, req *mcp.CallToolRequest) (*sockclient.Client, error) {
+	dir := sandboxCwd(req)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c, ok := p.byDir[dir]; ok {
+		return c, nil
+	}
+	o := p.opts
+	o.WorkDir = dir
+	cfg, err := client.ProjectPuppet(ctx, p.key, o)
+	if err != nil {
+		return nil, err
+	}
+	c := sockclient.New(cfg, version)
+	p.byDir[dir] = c
+	return c, nil
+}
+
+// sandboxCwd is the local path of the call's codex/sandbox-state-meta
+// sandboxCwd, or "" when Codex sent none. Codex sets _meta, not the model.
+func sandboxCwd(req *mcp.CallToolRequest) string {
+	state, _ := req.Params.GetMeta()[sandboxStateMeta].(map[string]any)
+	raw, _ := state["sandboxCwd"].(string)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "file" || !filepath.IsAbs(u.Path) {
+		return ""
+	}
+	return filepath.Clean(u.Path)
 }
 
 // puppetOptions are sock-mcp's inputs to sock-client's puppet resolution: the
@@ -111,7 +166,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	if *outbound && *channelMode {
 		return errors.New("--outbound-only and --channel cannot be combined: the channel consumes deliveries")
 	}
-	cfg, err := client.ResolvePuppet(ctx, puppetOptions(getenv, stderr))
+	po := puppetOptions(getenv, stderr)
+	cfg, err := client.LoadPuppetConfig(po)
 	if errors.Is(err, client.ErrNoPuppetCredential) {
 		// Nobody has signed in yet. Failing here shows nothing in a tool
 		// result, so serve the tools and answer each call with what to do.
@@ -120,10 +176,19 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	if err != nil {
 		return err
 	}
+	var perCall *projectClients
+	if *outbound && perCallProject(cfg, getenv) {
+		perCall = &projectClients{key: cfg, opts: po, byDir: map[string]*sockclient.Client{}}
+	} else if cfg, err = client.ProjectPuppet(ctx, cfg, po); err != nil {
+		return err
+	}
 	client := sockclient.New(cfg, version)
 	opts := &mcp.ServerOptions{}
 	if *outbound {
 		opts.Instructions = outboundInstructions
+	}
+	if perCall != nil {
+		opts.Capabilities = &mcp.ServerCapabilities{Experimental: map[string]any{sandboxStateMeta: map[string]any{}}}
 	}
 	if *channelMode {
 		opts.SupportedProtocolVersions = legacyHandshakeVersions()
@@ -168,7 +233,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 		}
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: version}, opts)
-	if *outbound {
+	if perCall != nil {
+		tools.RegisterOutboundFor(s, perCall.For, policy)
+	} else if *outbound {
 		tools.RegisterOutbound(s, client, policy)
 	} else {
 		tools.Register(s, client, policy)

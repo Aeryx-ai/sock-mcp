@@ -1043,3 +1043,54 @@ func TestPluginRootMachineKeyWithoutSandboxCwdFailsTheCallOnly(t *testing.T) {
 		t.Fatalf("server did not recover: %v", res)
 	}
 }
+
+// integrations-2ol: a send from a Codex session records which session asked in
+// that conversation, so the owner's reply can be put back into it.
+func TestCodexSendRecordsTheSessionAsk(t *testing.T) {
+	f := &fakeSock{}
+	getenv := serve(t, f)
+	peer, _ := handshake(t, []string{"--outbound-only"}, getenv)
+	conv := "0d6f9c7e-1111-4222-8333-444455556666"
+	meta := map[string]any{"x-codex-turn-metadata": map[string]any{"thread_id": "01a141ab-b265-75d0-894f-23e6071e210b"}}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := peer.Write(ctx, rpc(t, 7, "tools/call", map[string]any{"name": "sock_send", "_meta": meta, "arguments": map[string]any{"text": "hi", "conversation_id": conv}})); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		m, err := peer.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r, ok := m.(*jsonrpc.Response); ok {
+			if r.Error != nil {
+				t.Fatal(r.Error)
+			}
+			break
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(getenv("XDG_STATE_HOME"), "sock-integrations", "codex-asks", conv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) != 2 || fields[0] != "01a141ab-b265-75d0-894f-23e6071e210b" {
+		t.Fatalf("ask %q", b)
+	}
+	if at, err := strconv.ParseInt(fields[1], 10, 64); err != nil || time.Since(time.Unix(at, 0)) > time.Minute {
+		t.Fatalf("recorded_at %q", fields[1])
+	}
+}
+
+// A send from anything that is not Codex records no ask.
+func TestPlainSendRecordsNoAsk(t *testing.T) {
+	f := &fakeSock{}
+	getenv := serve(t, f)
+	peer, _ := handshake(t, []string{"--outbound-only"}, getenv)
+	if !sendTool(t, peer, map[string]any{"text": "hi", "conversation_id": "0d6f9c7e-1111-4222-8333-444455556666"}) {
+		t.Fatal("send failed")
+	}
+	if _, err := os.Stat(filepath.Join(getenv("XDG_STATE_HOME"), "sock-integrations", "codex-asks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("asks dir: %v", err)
+	}
+}

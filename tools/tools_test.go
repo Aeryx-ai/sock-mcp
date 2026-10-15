@@ -577,7 +577,7 @@ func TestReplyAcksInBatchesTheHubTakes(t *testing.T) {
 // or failed send is not a reply.
 func TestRepliedHearsOnlyOfPostedMessages(t *testing.T) {
 	var got []string
-	record := func(conv string) { got = append(got, conv) }
+	record := func(_ *mcp.CallToolRequest, conv string) { got = append(got, conv) }
 
 	structured(t, call(t, startWith(t, &fake{}, tools.Policy{Replied: record}), "sock_send", map[string]any{"text": "hi", "conversation_id": "c9"}))
 	if !slices.Equal(got, []string{"c1"}) { // the fake's hub says c1

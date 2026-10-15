@@ -24,6 +24,7 @@ import (
 	client "github.com/guygrigsby/sock-client"
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 
+	"github.com/guygrigsby/sock-mcp/internal/asks"
 	"github.com/guygrigsby/sock-mcp/internal/channel"
 	"github.com/guygrigsby/sock-mcp/internal/replies"
 	"github.com/guygrigsby/sock-mcp/sockclient"
@@ -96,6 +97,14 @@ func (p *projectClients) For(ctx context.Context, req *mcp.CallToolRequest) (*so
 	c := sockclient.New(cfg, version)
 	p.byDir[dir] = c
 	return c, nil
+}
+
+// codexThread is the Codex thread that made the call, from the turn metadata
+// Codex puts in every tools/call _meta, or "" from any other client.
+func codexThread(req *mcp.CallToolRequest) string {
+	turn, _ := req.Params.GetMeta()["x-codex-turn-metadata"].(map[string]any)
+	id, _ := turn["thread_id"].(string)
+	return id
 }
 
 // sandboxCwd is the local path of the call's codex/sandbox-state-meta
@@ -196,10 +205,18 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	var ch *channel.Channel
 	tr := &channel.Transport{Inner: transport}
 	policy := tools.Policy{NotifyOwner: messageOwner}
-	if dir, err := replies.Dir(getenv); err == nil {
-		// best effort: the send already posted, so a failed record is only logged
-		policy.Replied = func(conversationID string) {
-			if err := replies.Record(dir, conversationID, time.Now()); err != nil {
+	// Best effort: the send already posted, so a failed record is only logged.
+	repliesDir, repliesErr := replies.Dir(getenv)
+	asksDir, asksErr := asks.Dir(getenv)
+	policy.Replied = func(req *mcp.CallToolRequest, conversationID string) {
+		now := time.Now()
+		if repliesErr == nil {
+			if err := replies.Record(repliesDir, conversationID, now); err != nil {
+				_, _ = fmt.Fprintln(stderr, "sock-mcp:", err)
+			}
+		}
+		if session := codexThread(req); session != "" && asksErr == nil {
+			if err := asks.Record(asksDir, conversationID, session, now); err != nil {
 				_, _ = fmt.Fprintln(stderr, "sock-mcp:", err)
 			}
 		}

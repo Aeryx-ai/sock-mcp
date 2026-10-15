@@ -38,7 +38,8 @@ type Policy struct {
 	// Replied, when set, is told the conversation of every message a send
 	// actually posted (not a refused or failed one): the record a headless
 	// runner reads to know the agent answered.
-	Replied func(conversationID string)
+	// req is the call that posted it, for what its _meta says.
+	Replied func(req *mcp.CallToolRequest, conversationID string)
 }
 
 // Register adds every sock tool to s: the consuming surface, whose sock_send
@@ -308,7 +309,7 @@ func (h *handlers) send(ctx context.Context, req *mcp.CallToolRequest, in SendIn
 		return nil, Message{}, err
 	}
 	if h.p.Replied != nil {
-		h.p.Replied(m.GetConversationId())
+		h.p.Replied(req, m.GetConversationId())
 	}
 	// Only ids the model names are acked: it can name a message only if it
 	// saw it, which a channel push alone never proves. The reply posted, so

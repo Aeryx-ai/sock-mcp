@@ -134,10 +134,10 @@ func TestLoadConfigRefusesAReadableFileWithAToken(t *testing.T) {
 	}
 }
 
-func TestLoadConfigNoTokenAnywhereKeepsTheOldError(t *testing.T) {
+func TestLoadConfigNoTokenAnywhereSaysToSignIn(t *testing.T) {
 	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\n")
 	_, err := LoadConfig(g, nil)
-	if err == nil || !strings.Contains(err.Error(), "no token: set SOCK_TOKEN") {
+	if err == nil || !strings.Contains(err.Error(), "no sock credential: run `sock login` once") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -146,7 +146,7 @@ func TestLoadConfigNoTokenAnywhereKeepsTheOldError(t *testing.T) {
 func TestLoadConfigIgnoresTheHumanTokenInTheFile(t *testing.T) {
 	g := writeCLIConfig(t, 0o600, "url = \"https://file.example\"\ntoken = \"sock_st_human_secret\"\n")
 	_, err := LoadConfig(g, nil)
-	if err == nil || !strings.Contains(err.Error(), "no token") || strings.Contains(err.Error(), "sock_st_human_secret") {
+	if err == nil || !strings.Contains(err.Error(), "no sock credential") || strings.Contains(err.Error(), "sock_st_human_secret") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -169,14 +169,23 @@ func TestLoadConfigFileMachineKey(t *testing.T) {
 	}
 }
 
-// precedence: SOCK_TOKEN, then machine_key, then puppet_token
+// precedence: SOCK_TOKEN (a machine key, or a puppet token with no machine key
+// in the file), then machine_key, then puppet_token. A stale puppet token in
+// the environment (the plugin's old sock_token) loses to the file's machine key.
 func TestLoadConfigMachineKeyPrecedence(t *testing.T) {
 	g := writeCLIConfig(t, 0o600, "machine_key = \"sock_mk_dev_secret\"\npuppet_token = \"sock_pt_file\"\n")
 	if c, err := LoadConfig(g, nil); err != nil || c.Token != "sock_mk_dev_secret" {
 		t.Fatalf("file: got %+v, %v", c, err)
 	}
-	if c, err := LoadConfig(withEnv(g, map[string]string{"SOCK_TOKEN": "sock_pt_env"}), nil); err != nil || c.Token != "sock_pt_env" {
-		t.Fatalf("env: got %+v, %v", c, err)
+	if c, err := LoadConfig(withEnv(g, map[string]string{"SOCK_TOKEN": "sock_pt_env"}), nil); err != nil || c.Token != "sock_mk_dev_secret" {
+		t.Fatalf("a stale env puppet token must lose to the file's machine key: got %+v, %v", c, err)
+	}
+	if c, err := LoadConfig(withEnv(g, map[string]string{"SOCK_TOKEN": "sock_mk_env"}), nil); err != nil || c.Token != "sock_mk_env" {
+		t.Fatalf("env machine key: got %+v, %v", c, err)
+	}
+	only := writeCLIConfig(t, 0o600, "puppet_token = \"sock_pt_file\"\n")
+	if c, err := LoadConfig(withEnv(only, map[string]string{"SOCK_TOKEN": "sock_pt_env"}), nil); err != nil || c.Token != "sock_pt_env" {
+		t.Fatalf("env puppet token with no file machine key: got %+v, %v", c, err)
 	}
 }
 

@@ -109,6 +109,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, digest 
 		return errors.New("--outbound-only and --channel cannot be combined: the channel consumes deliveries")
 	}
 	cfg, err := client.ResolvePuppet(ctx, puppetOptions(getenv, stderr))
+	if errors.Is(err, client.ErrNoPuppetCredential) {
+		// Nobody has signed in yet. Failing here shows nothing in a tool
+		// result, so serve the tools and answer each call with what to do.
+		return serveWithoutCredential(ctx, *outbound, stderr, transport)
+	}
 	if err != nil {
 		return err
 	}
@@ -244,3 +249,34 @@ func replied(args []string, getenv func(string) string, stderr io.Writer) error 
 
 // errNoReply is replied's answer when nothing was posted.
 var errNoReply = errors.New("no reply was posted in that conversation since then")
+
+// serveWithoutCredential serves the same tools as a signed-in sock-mcp, and
+// every call answers "permanent: <ErrNoPuppetCredential>". No stream is
+// opened: there is nobody to listen as.
+func serveWithoutCredential(ctx context.Context, outbound bool, stderr io.Writer, transport mcp.Transport) error {
+	_, _ = fmt.Fprintln(stderr, "sock-mcp:", client.ErrNoPuppetCredential)
+	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: version}, &mcp.ServerOptions{})
+	// handlers never run: the middleware below answers first
+	idle := sockclient.New(client.Config{URL: client.DefaultURL}, version)
+	if outbound {
+		tools.RegisterOutbound(s, idle, tools.Policy{})
+	} else {
+		tools.Register(s, idle, tools.Policy{})
+	}
+	s.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/call" {
+				return &mcp.CallToolResult{
+					IsError: true,
+					Content: []mcp.Content{&mcp.TextContent{Text: "permanent: " + client.ErrNoPuppetCredential.Error()}},
+				}, nil
+			}
+			return next(ctx, method, req)
+		}
+	})
+	ss, err := s.Connect(ctx, transport, nil)
+	if err != nil {
+		return err
+	}
+	return ss.Wait()
+}

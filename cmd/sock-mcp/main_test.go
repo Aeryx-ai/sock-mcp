@@ -902,3 +902,48 @@ func TestRepliedRejectsBadArguments(t *testing.T) {
 		}
 	}
 }
+
+// A plugin starts sock-mcp before anyone has signed in. Failing at startup
+// shows nothing in a tool result, so with no credential it starts anyway,
+// lists its tools, and answers every call with what to do.
+func TestNoCredentialStartsAndEveryToolSaysToSignIn(t *testing.T) {
+	home := t.TempDir()
+	getenv := func(k string) string {
+		return map[string]string{"HOME": home, "XDG_STATE_HOME": filepath.Join(home, "state"), "XDG_CONFIG_HOME": filepath.Join(home, "config")}[k]
+	}
+	for _, args := range [][]string{nil, {"--outbound-only"}, {"--channel"}} {
+		peer, _ := handshake(t, args, getenv)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		for _, tool := range []string{"sock_whoami", "sock_send"} {
+			if err := peer.Write(ctx, rpc(t, 7, "tools/call", map[string]any{"name": tool, "arguments": map[string]any{"text": "hi", "conversation_id": "c1"}})); err != nil {
+				t.Fatal(err)
+			}
+			var text string
+			for {
+				m, err := peer.Read(ctx)
+				if err != nil {
+					t.Fatalf("%v %s: %v", args, tool, err)
+				}
+				resp, ok := m.(*jsonrpc.Response)
+				if !ok {
+					continue
+				}
+				var res struct {
+					IsError bool `json:"isError"`
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				}
+				if err := json.Unmarshal(resp.Result, &res); err != nil || !res.IsError || len(res.Content) != 1 {
+					t.Fatalf("%v %s: result %s (err %v)", args, tool, resp.Result, err)
+				}
+				text = res.Content[0].Text
+				break
+			}
+			if text != "permanent: no sock credential: run `sock login` once" {
+				t.Fatalf("%v %s: text %q", args, tool, text)
+			}
+		}
+		cancel()
+	}
+}

@@ -37,7 +37,8 @@ const Instructions = `Messages from sock arrive as <channel source="sock" conver
 type Channel struct {
 	Client *sockclient.Client
 	// Allow is the set of sender account ids whose messages are pushed.
-	// Anything else is dropped unacked. Empty means nothing is pushed.
+	// Anything else is acknowledged and dropped, never shown. Empty means
+	// nothing is pushed.
 	Allow map[string]bool
 	// Push delivers one event; an error means the transport is gone.
 	Push func(context.Context, Event) error
@@ -152,7 +153,17 @@ func (c *Channel) handle(ctx context.Context, m *sockv1.Message) error {
 	}
 	c.seen[m.GetId()] = struct{}{}
 	if !c.Allow[m.GetSenderId()] {
+		// Never shown to the model, so acknowledged and dropped: pending
+		// strangers fill the hub's page of the 500 oldest pending messages
+		// and would starve the owner's replies. A failed ack is retried when
+		// the message comes round again; it never ends the stream.
 		c.Log.Warn("dropped message from sender not on the allowlist", "message_id", m.GetId(), "sender_id", m.GetSenderId())
+		if _, err := client.Call(ctx, client.Retrier{Attempts: 1}, func(ctx context.Context) (*connect.Response[sockv1.AckResponse], error) {
+			return c.Client.Messaging.Ack(ctx, connect.NewRequest(&sockv1.AckRequest{MessageIds: []string{m.GetId()}}))
+		}); err != nil {
+			c.Log.Warn("could not acknowledge a dropped message; it stays pending", "message_id", m.GetId(), "err", describe(err))
+			delete(c.seen, m.GetId()) // try again when it is redelivered
+		}
 		return nil
 	}
 	switch ok, err := c.Counts.Take(m.GetId()); {

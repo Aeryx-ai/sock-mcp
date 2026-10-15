@@ -220,24 +220,33 @@ func TestChannelEndToEnd(t *testing.T) {
 	// The write reached the host, which proves nothing about display (a host
 	// without channels drops it), so nothing is acked until the model acts.
 	time.Sleep(200 * time.Millisecond)
-	if got := f.acked(); len(got) != 0 {
-		t.Fatalf("acked %v on a push alone", got)
-	}
+	strangerOnly(t, f.acked(), "on a push alone")
 	// A post into the conversation that names no message is no evidence the
 	// model saw the push: a session without channels can still find the
 	// owner's conversation and write there.
 	if !sendTool(t, peer, map[string]any{"text": "build done", "conversation_id": "c1"}) {
 		t.Fatal("send failed")
 	}
-	if got := f.acked(); len(got) != 0 {
-		t.Fatalf("acked %v on a post that answers no message", got)
-	}
+	strangerOnly(t, f.acked(), "on a post that answers no message")
 	// Naming the message from its channel tag is: the model had to see it.
 	if !sendTool(t, peer, map[string]any{"text": "all green", "conversation_id": "c1", "message_ids": []string{"m2"}}) {
 		t.Fatal("reply failed")
 	}
-	if got := f.acked(); !slices.Equal(got, []string{"m2"}) {
-		t.Fatalf("acked %v after the reply, want [m2]", got)
+	if got := f.acked(); !slices.Contains(got, "m2") {
+		t.Fatalf("acked %v after the reply, want m2 among them", got)
+	}
+}
+
+// strangerOnly is every ack a push alone may cause: the stranger's m1, which
+// the model never sees and which would otherwise sit in the hub's page of the
+// 500 oldest pending messages and starve the owner. The owner's m2 is never
+// acked by a push.
+func strangerOnly(t *testing.T, got []string, why string) {
+	t.Helper()
+	for _, id := range got {
+		if id != "m1" {
+			t.Fatalf("acked %v %s: only the stranger's m1 may be", got, why)
+		}
 	}
 }
 
@@ -850,7 +859,5 @@ func TestHostThatNeverActsGetsAtMostFivePushesAndNoAck(t *testing.T) {
 	if pushes != channel.MaxPushes {
 		t.Fatalf("pushed %d times over %d restarts, want %d", pushes, channel.MaxPushes+2, channel.MaxPushes)
 	}
-	if got := f.acked(); len(got) != 0 {
-		t.Fatalf("acked %v", got)
-	}
+	strangerOnly(t, f.acked(), "though the host never acted")
 }

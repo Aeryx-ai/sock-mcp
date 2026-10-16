@@ -25,14 +25,14 @@ import (
 	"github.com/guygrigsby/sock-mcp/sockclient"
 )
 
-// claudeSession is a Claude Code plugin server with --claude-inbound
-// (sock-integrations ADR 3 and ADR 4). With a machine key every call runs as
-// the session's own puppet, made on its first call; without one, as the
-// project's puppet. Once that puppet exists, the owner's replies to it are
-// written into the session's inbox and acknowledged.
+// claudeSession is a Claude Code plugin server with --claude-inbound and a
+// machine key (sock-integrations ADR 3 and ADR 4): every call runs as the
+// session's own puppet, made on its first call. Once that puppet exists, the
+// owner's replies to it are written into the session's inbox and
+// acknowledged.
 type claudeSession struct {
 	key      client.Config
-	sessions *client.SessionPuppets // nil: no machine key, one fixed puppet
+	sessions *client.SessionPuppets
 	session  client.Session
 	dir      string // the project, for the name of a session not yet named
 	inbox    inbox.Inbox
@@ -58,21 +58,10 @@ func newClaudeSession(key client.Config, sessions *client.SessionPuppets, id str
 		title:    titleReader{path: transcriptPath(getenv, id)},
 	}
 	s.inbox, _ = inbox.FromEnv(getenv)
-	if sessions != nil {
-		if tok := sessions.Cached(s.session); tok != "" {
-			s.setClient(tok)
-		}
+	if tok := sessions.Cached(s.session); tok != "" {
+		s.setClient(tok)
 	}
 	return s
-}
-
-// fixed makes c the session's client: the project's puppet, when there is no
-// machine key to make the session its own.
-func (s *claudeSession) fixed(c *sockclient.Client) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.c = c
-	close(s.ready)
 }
 
 func (s *claudeSession) setClient(tok string) {
@@ -104,9 +93,6 @@ func (s *claudeSession) For(ctx context.Context, _ *mcp.CallToolRequest) (*sockc
 // rename sets the puppet's name to the session's title, once the owner gave
 // it one (/rename). A session never titled keeps the name it was made with.
 func (s *claudeSession) rename(ctx context.Context) {
-	if s.sessions == nil {
-		return
-	}
 	if t := s.title.Title(); t != "" {
 		if err := s.sessions.SetName(ctx, s.session, t); err != nil {
 			s.log.Warn("cannot rename the session's puppet", "err", err)
@@ -114,35 +100,37 @@ func (s *claudeSession) rename(ctx context.Context) {
 	}
 }
 
-// Run listens until ctx ends, then archives the session's puppet. With a
-// machine key it first holds the session's run lock, so one server of a
-// session listens at a time, and archives the puppets of sessions whose
-// server died without doing so.
+// Run holds the session's run lock until ctx ends, so one server of a
+// session listens at a time and no other server's reconcile archives it, then
+// archives the session's puppet. It first archives the puppets of sessions
+// whose server died without doing so. It listens only with an inbox to write
+// to.
 func (s *claudeSession) Run(ctx context.Context) {
-	if s.sessions != nil {
-		unlock, err := runLock(ctx, s.sessions.Dir, s.session)
-		if err != nil {
-			if ctx.Err() == nil {
-				s.log.Error("no inbound: cannot take the session's run lock", "err", err)
-			}
-			return
+	unlock, err := runLock(ctx, s.sessions.Dir, s.session)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.Error("no inbound: cannot take the session's run lock", "err", err)
 		}
-		defer unlock()
-		s.reconcile(ctx)
+		return
 	}
+	defer unlock()
+	s.reconcile(ctx)
 	if !s.waitReady(ctx) {
 		return
 	}
-	if s.sessions != nil {
-		s.setArchived(ctx, false)
-		defer func() {
-			actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			s.setArchived(actx, true)
-		}()
-		s.mu.Lock()
-		s.rename(ctx)
-		s.mu.Unlock()
+	s.setArchived(ctx, false)
+	defer func() {
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		s.setArchived(actx, true)
+	}()
+	s.mu.Lock()
+	s.rename(ctx)
+	s.mu.Unlock()
+	if s.inbox.Socket == "" {
+		s.log.Warn("no session inbox (CLAUDE_CODE_MESSAGING_SOCKET), so the owner's replies wait at the hub")
+		<-ctx.Done()
+		return
 	}
 	s.listen(ctx)
 }
@@ -163,9 +151,6 @@ func (s *claudeSession) waitReady(ctx context.Context) bool {
 		case <-s.ready:
 			return true
 		case <-t.C:
-			if s.sessions == nil {
-				continue
-			}
 			s.mu.Lock()
 			if s.c == nil {
 				if tok := s.sessions.Cached(s.session); tok != "" {
@@ -183,7 +168,7 @@ func (s *claudeSession) listen(ctx context.Context) {
 	s.mu.Lock()
 	c := s.c
 	s.mu.Unlock()
-	me, allow, err := allowlist(ctx, c, s.getenv)
+	me, allow, err := ownerAllowlist(ctx, c)
 	if err != nil {
 		s.log.Warn("no inbound", "err", err)
 		return
@@ -217,9 +202,9 @@ func (s *claudeSession) push(c *sockclient.Client, counts *channel.Counts) func(
 		prompt := channel.OwnerPrompt(ev.Meta["conversation_id"], id, ev.Content)
 		delay := time.Second
 		for attempt := range 5 {
-			err := s.inbox.Send(ctx, prompt)
+			reply, err := s.inbox.Send(ctx, prompt)
 			if err == nil {
-				s.log.Info("reply put into the session", "message_id", id)
+				s.log.Info("reply put into the session", "message_id", id, "inbox_answered", reply)
 				if err := ackOne(ctx, c, id); err != nil {
 					s.log.Warn("could not acknowledge; a redelivery arrives as a repeat", "message_id", id, "err", err)
 					return nil

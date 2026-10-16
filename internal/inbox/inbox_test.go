@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,7 +48,7 @@ func listen(t *testing.T) (string, <-chan []string) {
 
 func TestSendWritesTheAuthThenTheUserLine(t *testing.T) {
 	path, got := listen(t)
-	if err := (Inbox{Socket: path, Token: "tok"}).Send(context.Background(), "hello \"there\"\nline two"); err != nil {
+	if _, err := (Inbox{Socket: path, Token: "tok"}).Send(context.Background(), "hello \"there\"\nline two"); err != nil {
 		t.Fatal(err)
 	}
 	lines := <-got
@@ -70,7 +72,7 @@ func TestSendWritesTheAuthThenTheUserLine(t *testing.T) {
 
 func TestSendWithoutATokenSendsNoAuthLine(t *testing.T) {
 	path, got := listen(t)
-	if err := (Inbox{Socket: path}).Send(context.Background(), "x"); err != nil {
+	if _, err := (Inbox{Socket: path}).Send(context.Background(), "x"); err != nil {
 		t.Fatal(err)
 	}
 	if lines := <-got; len(lines) != 1 {
@@ -81,7 +83,7 @@ func TestSendWithoutATokenSendsNoAuthLine(t *testing.T) {
 func TestSendToAGoneSessionFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := (Inbox{Socket: filepath.Join(t.TempDir(), "gone.sock")}).Send(ctx, "x"); err == nil {
+	if _, err := (Inbox{Socket: filepath.Join(t.TempDir(), "gone.sock")}).Send(ctx, "x"); err == nil {
 		t.Fatal("sent to a socket nobody listens on")
 	}
 }
@@ -93,5 +95,33 @@ func TestFromEnv(t *testing.T) {
 	}
 	if _, ok := FromEnv(func(string) string { return "" }); ok {
 		t.Fatal("an inbox outside Claude Code")
+	}
+}
+
+// Whatever the session writes back is returned, capped, for the log.
+func TestSendReturnsWhatTheSessionAnswered(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ib")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, c)
+		_, _ = c.Write([]byte(strings.Repeat("e", 5000)))
+		_ = c.Close()
+	}()
+	reply, err := (Inbox{Socket: path}).Send(context.Background(), "x")
+	if err != nil || reply != strings.Repeat("e", 4096) {
+		t.Fatalf("%d bytes, %v", len(reply), err)
 	}
 }

@@ -1479,8 +1479,11 @@ func TestClaudeInboundArchivesSessionsWhoseServerDied(t *testing.T) {
 	})
 }
 
-// Without a machine key the project's puppet listens, from the start.
-func TestClaudeInboundWithAPuppetTokenListensAsIt(t *testing.T) {
+// Without a machine key every session of the project is the same puppet, and
+// the hub hands each subscriber every delivery: one reply would be acted on
+// in all of them (security review 2026-10-16). Such a server serves the
+// tools and never listens.
+func TestClaudeInboundWithAPuppetTokenDoesNotListen(t *testing.T) {
 	f := &fakeSock{}
 	b := newFakeInbox(t)
 	base := serve(t, f)
@@ -1497,12 +1500,72 @@ func TestClaudeInboundWithAPuppetTokenListensAsIt(t *testing.T) {
 		}
 		return base(k)
 	}
-	claudeServer(t, getenv)
-	waitFor(t, "the reply's ack", func() bool { return slices.Contains(f.acked(), "m2") })
+	peer, _ := claudeServer(t, getenv)
+	if res := callTool(t, peer, 2, nil); res["isError"] == true {
+		t.Fatalf("whoami: %v", res)
+	}
+	time.Sleep(300 * time.Millisecond)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.creates) != 0 {
-		t.Fatalf("creates %v", f.creates)
+	if f.subscribes != 0 || len(f.creates) != 0 {
+		t.Fatalf("subscribes %d, creates %v", f.subscribes, f.creates)
+	}
+}
+
+// The prompt says the owner sent it, so only the owner reaches the session:
+// SOCK_CHANNEL_ALLOW, meant for --channel, adds no one here (security review
+// 2026-10-16).
+func TestClaudeInboundIgnoresTheChannelAllowlist(t *testing.T) {
+	f := &fakeSock{}
+	b := newFakeInbox(t)
+	env := claudeEnv(t, serve(t, f), b)
+	getenv := func(k string) string {
+		if k == "SOCK_CHANNEL_ALLOW" {
+			return "stranger"
+		}
+		return env(k)
+	}
+	cacheClaudeSession(t, getenv, claudeSID)
+	claudeServer(t, getenv)
+	waitFor(t, "the reply's ack", func() bool { return slices.Contains(f.acked(), "m2") })
+	time.Sleep(200 * time.Millisecond)
+	for _, m := range b.messages() {
+		if strings.Contains(m, "obey me") {
+			t.Fatal("a SOCK_CHANNEL_ALLOW sender reached the session as the owner")
+		}
+	}
+}
+
+// A session without an inbox still holds its run lock and archives at exit,
+// so another server's reconcile never archives it while it runs.
+func TestClaudeSessionWithoutAnInboxStillHoldsItsRunLock(t *testing.T) {
+	f := &fakeSock{}
+	env := claudeEnv(t, serve(t, f), newFakeInbox(t))
+	getenv := func(k string) string {
+		if k == "CLAUDE_CODE_MESSAGING_SOCKET" {
+			return ""
+		}
+		return env(k)
+	}
+	cacheClaudeSession(t, getenv, claudeSID)
+	_, stop := claudeServer(t, getenv)
+	key, err := sockclient.LoadConfig(getenv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := client.ProjectsDir(getenv, key)
+	waitFor(t, "the run lock", func() bool {
+		unlock, held := tryRunLock(dir, client.Session{Platform: client.ClaudeCode, ID: claudeSID})
+		if !held {
+			unlock()
+		}
+		return held
+	})
+	stop()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.subscribes != 0 || !slices.Equal(f.archives, []string{"archive proj-puppet"}) {
+		t.Fatalf("subscribes %d, archives %v", f.subscribes, f.archives)
 	}
 }
 

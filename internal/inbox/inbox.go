@@ -5,6 +5,7 @@
 package inbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,14 +32,15 @@ func FromEnv(getenv func(string) string) (Inbox, bool) {
 const timeout = 5 * time.Second
 
 // Send queues text as a user message in the session. A nil error means the
-// inbox took both lines; Claude Code answers nothing on success.
-func (b Inbox) Send(ctx context.Context, text string) error {
+// inbox took both lines. reply is whatever the session wrote back, up to 4
+// KiB: what Claude Code answers is not documented, so the caller logs it.
+func (b Inbox) Send(ctx context.Context, text string) (reply string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", b.Socket)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = conn.Close() }()
 	if dl, ok := ctx.Deadline(); ok {
@@ -51,24 +53,38 @@ func (b Inbox) Send(ctx context.Context, text string) error {
 	}
 	user, err := json.Marshal(map[string]any{"type": "user", "message": map[string]string{"role": "user", "content": text}})
 	if err != nil {
-		return err
+		return "", err
 	}
 	frame = append(append(frame, user...), '\n')
 	if _, err := conn.Write(frame); err != nil {
-		return err
+		return "", err
 	}
 	if uc, ok := conn.(*net.UnixConn); ok {
 		if err := uc.CloseWrite(); err != nil {
-			return err
+			return "", err
 		}
 	}
 	// Wait for the session to close its end, so the lines were read before
 	// this returns. A session that keeps it open is fine once the deadline
 	// passes: the write was taken.
-	_, err = io.Copy(io.Discard, conn)
+	var got bytes.Buffer
+	_, err = io.Copy(&limited{&got, 4096}, conn)
 	var ne net.Error
 	if err != nil && (!errors.As(err, &ne) || !ne.Timeout()) {
-		return err
+		return got.String(), err
 	}
-	return nil
+	return got.String(), nil
+}
+
+// limited keeps the first n bytes written and discards the rest.
+type limited struct {
+	b *bytes.Buffer
+	n int
+}
+
+func (l *limited) Write(p []byte) (int, error) {
+	if room := l.n - l.b.Len(); room > 0 {
+		l.b.Write(p[:min(room, len(p))])
+	}
+	return len(p), nil
 }

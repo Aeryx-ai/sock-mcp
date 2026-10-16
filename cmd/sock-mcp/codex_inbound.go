@@ -232,7 +232,7 @@ func (l *codexInbound) serve(ctx context.Context, s client.Session, sub *subscri
 		return
 	}
 	c := sockclient.New(cfg, version)
-	me, allow, err := allowlist(ctx, c, l.getenv)
+	me, allow, err := ownerAllowlist(ctx, c)
 	if err != nil {
 		l.log.Warn("cannot listen for a Codex session", "thread", s.ID, "err", err)
 		return

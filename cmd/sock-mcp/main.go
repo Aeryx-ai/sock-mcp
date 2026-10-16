@@ -255,9 +255,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	}
 	client := sockclient.New(cfg, version)
 	if *claudeIn && claude == nil {
-		// no machine key or no session id: the project's puppet listens
-		claude = newClaudeSession(cfg, nil, sid, getenv, stderr)
-		claude.fixed(client)
+		// Every session of the project would be this one puppet, and the hub
+		// hands each subscriber every delivery: one reply acted on in all.
+		_, _ = fmt.Fprintln(stderr, "sock-mcp: --claude-inbound: the owner's replies need a machine key and a session id (sock machine-key use); tools only")
 	}
 	opts := &mcp.ServerOptions{}
 	if *outbound {
@@ -321,21 +321,17 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 		return err
 	}
 	if claude != nil {
-		if claude.inbox.Socket == "" {
-			_, _ = fmt.Fprintln(stderr, "sock-mcp: --claude-inbound: no session inbox (CLAUDE_CODE_MESSAGING_SOCKET), so the owner's replies wait at the hub")
-		} else {
-			// The session's end archives its puppet: wait for that, briefly.
-			lctx, lcancel := context.WithCancel(ctx)
-			done := make(chan struct{})
-			go func() { defer close(done); claude.Run(lctx) }()
-			defer func() {
-				lcancel()
-				select {
-				case <-done:
-				case <-time.After(10 * time.Second):
-				}
-			}()
-		}
+		// The session's end archives its puppet: wait for that, briefly.
+		lctx, lcancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); claude.Run(lctx) }()
+		defer func() {
+			lcancel()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+			}
+		}()
 	}
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- ss.Wait() }()
@@ -352,6 +348,16 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 // puppet's owner plus SOCK_CHANNEL_ALLOW (comma separated account ids). Empty
 // fails closed.
 func allowlist(ctx context.Context, c *sockclient.Client, getenv func(string) string) (string, map[string]bool, error) {
+	return allowlistOf(ctx, c, getenv("SOCK_CHANNEL_ALLOW"))
+}
+
+// ownerAllowlist is allowlist without SOCK_CHANNEL_ALLOW: a listener's prompt
+// says the owner sent it, so only the owner may (security review 2026-10-16).
+func ownerAllowlist(ctx context.Context, c *sockclient.Client) (string, map[string]bool, error) {
+	return allowlistOf(ctx, c, "")
+}
+
+func allowlistOf(ctx context.Context, c *sockclient.Client, extra string) (string, map[string]bool, error) {
 	allow := map[string]bool{}
 	me, err := sockclient.Call(ctx, c, func(ctx context.Context) (*sockv1.Account, error) {
 		res, err := c.Identity.GetMe(ctx, connect.NewRequest(&sockv1.GetMeRequest{}))
@@ -366,7 +372,7 @@ func allowlist(ctx context.Context, c *sockclient.Client, getenv func(string) st
 	if p := me.GetPuppet(); p != nil {
 		allow[p.GetOwnerId()] = true
 	}
-	for id := range strings.SplitSeq(getenv("SOCK_CHANNEL_ALLOW"), ",") {
+	for id := range strings.SplitSeq(extra, ",") {
 		if id = strings.TrimSpace(id); id != "" {
 			allow[id] = true
 		}

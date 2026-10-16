@@ -35,10 +35,16 @@ type codexInbound struct {
 	getenv   func(string) string
 	log      *slog.Logger
 
-	mu       sync.Mutex
-	serving  map[string]context.CancelFunc // thread id -> its subscription
-	archived map[string]bool               // last archive state set, per thread
+	mu      sync.Mutex
+	serving map[string]*subscription // thread id -> its subscription
+	// noArchive is set when the hub answers Unimplemented: it has no archive
+	// calls yet, so none are made until the next start.
+	noArchive bool
 }
+
+// subscription is one serve of a thread; its identity lets serve remove only
+// its own entry when a stop and a start race.
+type subscription struct{ cancel context.CancelFunc }
 
 func newCodexInbound(key client.Config, sessions *client.SessionPuppets, getenv func(string) string, stderr io.Writer) *codexInbound {
 	return &codexInbound{
@@ -47,8 +53,7 @@ func newCodexInbound(key client.Config, sessions *client.SessionPuppets, getenv 
 		daemon:   codex.Daemon{Socket: codex.DefaultSocket(getenv), Version: version},
 		getenv:   getenv,
 		log:      slog.New(slog.NewTextHandler(stderr, nil)).With("component", "codex-inbound"),
-		serving:  map[string]context.CancelFunc{},
-		archived: map[string]bool{},
+		serving:  map[string]*subscription{},
 	}
 }
 
@@ -78,6 +83,10 @@ func (l *codexInbound) Run(ctx context.Context) {
 // lock blocks until this process holds the machine's listener lock, beside
 // the session puppet cache.
 func (l *codexInbound) lock(ctx context.Context) (func(), error) {
+	if !filepath.IsAbs(l.sessions.Dir) {
+		// never under the working directory, as for the puppet cache itself
+		return nil, errors.New("no home directory for the listener lock (set HOME or XDG_STATE_HOME)")
+	}
 	if err := os.MkdirAll(l.sessions.Dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -162,26 +171,27 @@ func (l *codexInbound) rescan(ctx context.Context) {
 	}
 }
 
-// setArchived archives or unarchives s when that is not already what this
-// listener set. A failure is retried at the next rescan.
+// setArchived archives or unarchives s when that is not already its state
+// (kept in the cache, so a restart does not repeat it). A failure is retried at
+// a later rescan; a hub without the call is not asked again until restart.
 func (l *codexInbound) setArchived(ctx context.Context, s client.Session, archived bool) {
 	l.mu.Lock()
-	prev, known := l.archived[s.ID]
+	skip := l.noArchive
 	l.mu.Unlock()
-	if known && prev == archived {
+	if skip {
 		return
 	}
-	call := l.sessions.Unarchive
-	if archived {
-		call = l.sessions.Archive
+	err := l.sessions.SetArchived(ctx, s, archived)
+	switch {
+	case err == nil:
+	case connect.CodeOf(err) == connect.CodeUnimplemented:
+		l.mu.Lock()
+		l.noArchive = true
+		l.mu.Unlock()
+		l.log.Warn("the hub cannot archive puppets yet; not asking again until restart")
+	default:
+		l.log.Warn("cannot set a Codex session puppet's archive state; retried at a later rescan", "thread", s.ID, "archived", archived, "err", client.Describe(err))
 	}
-	if err := call(ctx, s); err != nil {
-		l.log.Warn("cannot set a Codex session puppet's archive state; retried at the next rescan", "thread", s.ID, "archived", archived, "err", client.Describe(err))
-		return
-	}
-	l.mu.Lock()
-	l.archived[s.ID] = archived
-	l.mu.Unlock()
 }
 
 func (l *codexInbound) start(ctx context.Context, s client.Session) {
@@ -191,26 +201,30 @@ func (l *codexInbound) start(ctx context.Context, s client.Session) {
 		return
 	}
 	sctx, cancel := context.WithCancel(ctx)
-	l.serving[s.ID] = cancel
-	go l.serve(sctx, s)
+	sub := &subscription{cancel: cancel}
+	l.serving[s.ID] = sub
+	go l.serve(sctx, s, sub)
 }
 
 func (l *codexInbound) stop(threadID string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if cancel, ok := l.serving[threadID]; ok {
-		cancel()
+	if sub, ok := l.serving[threadID]; ok {
+		sub.cancel()
 		delete(l.serving, threadID)
 	}
 }
 
 // serve subscribes as s's puppet until ctx ends or the hub refuses the token
 // for good; the thread is then free for a later rescan.
-func (l *codexInbound) serve(ctx context.Context, s client.Session) {
+func (l *codexInbound) serve(ctx context.Context, s client.Session, sub *subscription) {
 	defer func() {
 		l.mu.Lock()
-		delete(l.serving, s.ID)
+		if l.serving[s.ID] == sub { // a later start's entry is not ours to remove
+			delete(l.serving, s.ID)
+		}
 		l.mu.Unlock()
+		sub.cancel()
 	}()
 	cfg := l.key // the key's server and gate, the puppet's token
 	cfg.Token = l.sessions.Cached(s)

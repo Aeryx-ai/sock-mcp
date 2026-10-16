@@ -37,17 +37,19 @@ type fakeSock struct {
 	sockv1connect.UnimplementedMessagingServiceHandler
 	human bool
 
-	mu         sync.Mutex
-	notifies   []string // NotifyOwner texts
-	posts      []string // Send conversation ids
-	auths      []string // Authorization of each GetMe
-	creates    []string // puppet names asked for
-	createAuth string
-	createErr  error
-	acks       []string // acked message ids
-	subscribes int
-	archives   []string // "archive <id>" or "unarchive <id>"
-	renames    []string // "<authorization> <name>"
+	mu                   sync.Mutex
+	notifies             []string // NotifyOwner texts
+	posts                []string // Send conversation ids
+	auths                []string // Authorization of each GetMe
+	creates              []string // puppet names asked for
+	createAuth           string
+	createErr            error
+	acks                 []string // acked message ids
+	subscribes           int
+	archives             []string // "archive <id>" or "unarchive <id>"
+	renames              []string // "<authorization> <name>"
+	archiveCalls         int
+	archiveUnimplemented bool
 }
 
 func (f *fakeSock) CreatePuppet(_ context.Context, r *connect.Request[sockv1.CreatePuppetRequest]) (*connect.Response[sockv1.CreatePuppetResponse], error) {
@@ -1004,6 +1006,10 @@ func codexMeta(dir, thread string) map[string]any {
 func (f *fakeSock) ArchivePuppet(_ context.Context, r *connect.Request[sockv1.ArchivePuppetRequest]) (*connect.Response[sockv1.ArchivePuppetResponse], error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.archiveCalls++
+	if f.archiveUnimplemented {
+		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("not yet"))
+	}
 	f.archives = append(f.archives, "archive "+r.Msg.GetPuppetId())
 	return connect.NewResponse(&sockv1.ArchivePuppetResponse{}), nil
 }
@@ -1151,7 +1157,7 @@ func TestCodexInboundInjectsTheOwnersReply(t *testing.T) {
 	if len(f.creates) != 1 {
 		t.Fatalf("creates %v: the listener must use the cached puppet, never mint", f.creates)
 	}
-	if !slices.Equal(f.archives, []string{"unarchive proj-puppet"}) {
+	if len(f.archives) != 0 { // a new puppet is unarchived already
 		t.Fatalf("archives %v", f.archives)
 	}
 	if len(f.renames) != 1 || !strings.HasPrefix(f.renames[0], "Bearer sock_pt_projdev_secret Fix the parser on ") {
@@ -1196,5 +1202,34 @@ func TestCodexInboundNeverMints(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.creates) != 0 || f.subscribes != 0 {
 		t.Fatalf("creates %v, subscribes %d", f.creates, f.subscribes)
+	}
+}
+
+// Security review 2026-10-15: rescans fire on every thread event. A puppet
+// already archived is not archived again, and a hub without the call (not yet
+// deployed) is asked once, not on every event.
+func TestCodexInboundArchivesOnceAndStopsOnUnimplemented(t *testing.T) {
+	for name, unimpl := range map[string]bool{"deployed": false, "not deployed": true} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeSock{archiveUnimplemented: unimpl}
+			base := serve(t, f)
+			root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
+			n := `{"method":"thread/status/changed","params":{"threadId":"live","status":{"type":"idle"}}}`
+			d := &codextest.Server{Threads: []codextest.Thread{{ID: "live", Cwd: root}}, Loaded: []string{"live"}, Notify: []string{n, n, n, n}}
+			getenv := codexDaemon(t, d, codexEnv(t, base, "", root, root))
+			cacheSession(t, getenv, "gone")
+			handshake(t, []string{"--outbound-only", "--codex-inbound"}, getenv)
+			waitFor(t, "an archive call", func() bool {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				return f.archiveCalls > 0
+			})
+			time.Sleep(500 * time.Millisecond)
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.archiveCalls != 1 {
+				t.Fatalf("%d archive calls over 5 rescans", f.archiveCalls)
+			}
+		})
 	}
 }

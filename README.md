@@ -34,6 +34,10 @@ With a machine key (`sock_mk_…`, from `sock machine-key create`) as `SOCK_TOKE
 
 With `--channel` the server offers MCP protocol versions only up to 2025-11-25. Claude Code 2.1.292 and later negotiates the newest revision a stdio server offers, and a channel server on 2026-07-28 is not registered as a channel (no delivery path); the earlier handshake is. The cap lifts when Claude Code's changelog adds channel delivery on 2026-07-28.
 
+## Claude Code inbox (`--claude-inbound`)
+
+`sock-mcp --outbound-only --claude-inbound` is the Claude Code plugin's server. With a machine key it runs as the session's own puppet (`CLAUDE_CODE_SESSION_ID`), made on the session's first tool call, named for the project until the session gets a `/rename` title and archived when the server exits; without one, as the project's puppet. Once that puppet exists it subscribes, and each reply from its owner is written into the session through the inbox Claude Code hands its MCP servers (`CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`) and acknowledged when the inbox took it. No channel flag is needed. One server per session listens (a run lock under the puppet cache); a starting server archives the puppets of Claude Code sessions whose server died. Decision: [sock-integrations ADR 4](https://github.com/aeryx-ai/sock-integrations/blob/main/docs/adr/0004-claude-replies-enter-through-the-session-inbox.md).
+
 ## Claude Code channel
 
 `sock-mcp --channel` pushes messages from your puppet's owner into the running session. Only the owner (and ids in `SOCK_CHANNEL_ALLOW`) can reach Claude this way. Needs `--dangerously-load-development-channels` during the research preview. Details: [docs/specs/tools.md](docs/specs/tools.md).

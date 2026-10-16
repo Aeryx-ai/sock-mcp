@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1234,5 +1236,281 @@ func TestCodexInboundArchivesOnceAndStopsOnUnimplemented(t *testing.T) {
 				t.Fatalf("%d archive calls over 5 rescans", f.archiveCalls)
 			}
 		})
+	}
+}
+
+// fakeInbox serves a Claude Code session inbox and collects each user line's
+// content.
+type fakeInbox struct {
+	path string
+	mu   sync.Mutex
+	got  []string
+	auth []string
+}
+
+func newFakeInbox(t *testing.T) *fakeInbox {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ib") // a Unix socket path is at most 104 bytes on macOS
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	b := &fakeInbox{path: filepath.Join(dir, "s.sock")}
+	l, err := net.Listen("unix", b.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			sc := bufio.NewScanner(c)
+			for sc.Scan() {
+				var line struct {
+					Type    string `json:"type"`
+					Token   string `json:"token"`
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				}
+				_ = json.Unmarshal(sc.Bytes(), &line)
+				b.mu.Lock()
+				if line.Type == "auth" {
+					b.auth = append(b.auth, line.Token)
+				} else {
+					b.got = append(b.got, line.Message.Content)
+				}
+				b.mu.Unlock()
+			}
+			_ = c.Close()
+		}
+	}()
+	return b
+}
+
+func (b *fakeInbox) messages() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string{}, b.got...)
+}
+
+const claudeSID = "0123abcd-4444-5555-6666-777788889999"
+
+// claudeEnv is a Claude Code plugin server's environment: a machine key in
+// the config file, the session's id and inbox, and a transcript home.
+func claudeEnv(t *testing.T, base func(string) string, b *fakeInbox) func(string) string {
+	t.Helper()
+	proj := gitRepo(t, filepath.Join(t.TempDir(), "claudeproj"))
+	env := codexEnv(t, base, "", proj, "")
+	extra := map[string]string{
+		"CLAUDE_CODE_SESSION_ID":       claudeSID,
+		"CLAUDE_PROJECT_DIR":           proj,
+		"CLAUDE_CODE_MESSAGING_SOCKET": b.path,
+		"CLAUDE_CODE_MESSAGING_TOKEN":  "inbox-secret",
+		"CLAUDE_CONFIG_DIR":            t.TempDir(),
+	}
+	return func(k string) string {
+		if v, ok := extra[k]; ok {
+			return v
+		}
+		return env(k)
+	}
+}
+
+// writeTitle appends a /rename entry to the session's transcript.
+func writeTitle(t *testing.T, getenv func(string) string, title string) {
+	t.Helper()
+	dir := mkdir(t, filepath.Join(getenv("CLAUDE_CONFIG_DIR"), "projects", "-claudeproj"))
+	f, err := os.OpenFile(filepath.Join(dir, claudeSID+".jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	_, _ = fmt.Fprintf(f, "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n{\"type\":\"custom-title\",\"customTitle\":%q,\"sessionId\":%q}\n", title, claudeSID)
+}
+
+func cacheClaudeSession(t *testing.T, getenv func(string) string, id string) {
+	t.Helper()
+	key, err := sockclient.LoadConfig(getenv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newSessionPuppets(key, getenv, io.Discard).Ensure(t.Context(), client.Session{Platform: client.ClaudeCode, ID: id}, "x"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// claudeServer runs a --claude-inbound server until stop, which waits for it.
+func claudeServer(t *testing.T, getenv func(string) string) (mcp.Connection, func()) {
+	t.Helper()
+	ct, st := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = run(ctx, []string{"--outbound-only", "--claude-inbound"}, getenv, false, io.Discard, st)
+	}()
+	peer, err := ct.Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Write(ctx, rpc(t, 1, "initialize", map[string]any{
+		"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "t", "version": "1"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.Read(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Write(ctx, &jsonrpc.Request{Method: "notifications/initialized", Params: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	stop := func() {
+		cancel()
+		_ = peer.Close()
+		<-done
+	}
+	t.Cleanup(stop)
+	return peer, stop
+}
+
+// sock-integrations ADR 3: a Claude Code session is its own puppet, made with
+// the machine key on its first call and named for its project until the
+// owner names the session.
+func TestClaudeCallsRunAsTheSessionsPuppet(t *testing.T) {
+	f := &fakeSock{}
+	getenv := claudeEnv(t, serve(t, f), newFakeInbox(t))
+	peer, _ := claudeServer(t, getenv)
+	for i := range 2 {
+		if res := callTool(t, peer, float64(2+i), nil); res["isError"] == true {
+			t.Fatalf("whoami: %v", res)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.creates) != 1 || !strings.HasPrefix(f.creates[0], "claudeproj 0123abcd on ") || f.createAuth != "Bearer sock_mk_dev_machinesecret" {
+		t.Fatalf("creates %v as %q", f.creates, f.createAuth)
+	}
+	for _, a := range f.auths {
+		if a != "Bearer sock_pt_projdev_secret" {
+			t.Fatalf("a call went out as %q", a)
+		}
+	}
+}
+
+// sock-integrations ADR 4: the owner's reply to the session's puppet is
+// written into the session's inbox, with its auth line, and acknowledged; a
+// stranger's never reaches the session.
+func TestClaudeInboundPutsTheOwnersReplyInTheInbox(t *testing.T) {
+	f := &fakeSock{}
+	b := newFakeInbox(t)
+	getenv := claudeEnv(t, serve(t, f), b)
+	cacheClaudeSession(t, getenv, claudeSID)
+	claudeServer(t, getenv)
+	waitFor(t, "the reply's ack", func() bool { return slices.Contains(f.acked(), "m2") })
+	got := b.messages()
+	if len(got) != 1 || !strings.Contains(got[0], "<sock-message from=\"owner\" conversation=\"c1\" id=\"m2\">\nstatus?\n</sock-message>") {
+		t.Fatalf("inbox got %q", got)
+	}
+	b.mu.Lock()
+	auth := b.auth
+	b.mu.Unlock()
+	if !slices.Equal(auth, []string{"inbox-secret"}) {
+		t.Fatalf("auth lines %q", auth)
+	}
+}
+
+// A session that never called a tool has no puppet: nothing listens until
+// its first call makes one, and then it does.
+func TestClaudeInboundListensOnceTheFirstCallMakesThePuppet(t *testing.T) {
+	f := &fakeSock{}
+	b := newFakeInbox(t)
+	getenv := claudeEnv(t, serve(t, f), b)
+	peer, _ := claudeServer(t, getenv)
+	time.Sleep(300 * time.Millisecond)
+	f.mu.Lock()
+	subs := f.subscribes
+	f.mu.Unlock()
+	if subs != 0 {
+		t.Fatalf("%d subscribes before the session had a puppet", subs)
+	}
+	callTool(t, peer, 2, nil)
+	waitFor(t, "the reply in the inbox", func() bool { return len(b.messages()) == 1 })
+}
+
+// The puppet takes the session's /rename title, and is archived when the
+// session's server ends.
+func TestClaudeInboundRenamesForTheTitleAndArchivesAtExit(t *testing.T) {
+	f := &fakeSock{}
+	getenv := claudeEnv(t, serve(t, f), newFakeInbox(t))
+	cacheClaudeSession(t, getenv, claudeSID)
+	writeTitle(t, getenv, "Fix the parser")
+	_, stop := claudeServer(t, getenv)
+	waitFor(t, "the rename", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.renames) == 1
+	})
+	stop()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !strings.HasPrefix(f.renames[0], "Bearer sock_pt_projdev_secret Fix the parser on ") {
+		t.Fatalf("renames %v", f.renames)
+	}
+	if !slices.Equal(f.archives, []string{"archive proj-puppet"}) {
+		t.Fatalf("archives %v", f.archives)
+	}
+}
+
+// A Claude Code session puppet whose server is gone without archiving it is
+// archived by the next server to start; a running one is not.
+func TestClaudeInboundArchivesSessionsWhoseServerDied(t *testing.T) {
+	f := &fakeSock{}
+	getenv := claudeEnv(t, serve(t, f), newFakeInbox(t))
+	cacheClaudeSession(t, getenv, "dead-session")
+	claudeServer(t, getenv)
+	waitFor(t, "the archive", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.archives) == 1
+	})
+}
+
+// Without a machine key the project's puppet listens, from the start.
+func TestClaudeInboundWithAPuppetTokenListensAsIt(t *testing.T) {
+	f := &fakeSock{}
+	b := newFakeInbox(t)
+	base := serve(t, f)
+	proj := gitRepo(t, filepath.Join(t.TempDir(), "tokproj"))
+	t.Chdir(proj)
+	getenv := func(k string) string {
+		switch k {
+		case "CLAUDE_CODE_SESSION_ID":
+			return claudeSID
+		case "CLAUDE_PROJECT_DIR":
+			return proj
+		case "CLAUDE_CODE_MESSAGING_SOCKET":
+			return b.path
+		}
+		return base(k)
+	}
+	claudeServer(t, getenv)
+	waitFor(t, "the reply's ack", func() bool { return slices.Contains(f.acked(), "m2") })
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.creates) != 0 {
+		t.Fatalf("creates %v", f.creates)
+	}
+}
+
+func TestClaudeInboundExcludesTheOtherConsumers(t *testing.T) {
+	for _, extra := range []string{"--channel", "--codex-inbound"} {
+		err := run(t.Context(), []string{"--claude-inbound", extra}, func(string) string { return "" }, false, io.Discard, nil)
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+			t.Fatalf("%s: %v", extra, err)
+		}
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -80,6 +81,14 @@ func newSessionPuppets(key client.Config, getenv func(string) string, stderr io.
 		Check:  client.NewTokenCheck(key, ua),
 		Log:    sockclient.Prefixed(func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) }),
 	}
+}
+
+// claudeSessionServer reports whether a Claude Code plugin server can run as
+// its session's own puppet: it holds a machine key and Claude Code named the
+// session (sock-integrations ADR 3).
+func claudeSessionServer(cfg client.Config, sid string) bool {
+	_, err := client.ParseSession(string(client.ClaudeCode) + ":" + sid)
+	return client.TokenKind(cfg.Token) == client.KindMachineKey && err == nil
 }
 
 // sessionClients runs each call as the puppet of the Codex thread that made
@@ -180,7 +189,7 @@ func takeMessageOwner() bool {
 }
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:], os.Getenv, takeMessageOwner(), os.Stderr, &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintln(os.Stderr, "sock-mcp:", err)
@@ -197,6 +206,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	channelMode := fs.Bool("channel", false, "also push inbound messages to a Claude Code session (claude/channel)")
 	outbound := fs.Bool("outbound-only", false, "serve only sock_whoami, sock_list_conversations and sock_send (no sock_fetch or sock_ack)")
 	codexIn := fs.Bool("codex-inbound", false, "Codex plugin: put the owner's replies into loaded Codex sessions through the app-server daemon")
+	claudeIn := fs.Bool("claude-inbound", false, "Claude Code plugin: run as the session's own puppet and put the owner's replies into the session's inbox")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -205,6 +215,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	}
 	if *codexIn && *channelMode {
 		return errors.New("--codex-inbound and --channel cannot be combined: both consume deliveries")
+	}
+	if *claudeIn && (*channelMode || *codexIn) {
+		return errors.New("--claude-inbound cannot be combined with --channel or --codex-inbound: each consumes deliveries")
 	}
 	po := puppetOptions(getenv, stderr)
 	cfg, err := client.LoadPuppetConfig(po)
@@ -216,14 +229,23 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	if err != nil {
 		return err
 	}
-	var perCall *sessionClients
-	if *outbound && codexSessionServer(cfg, getenv) {
+	var (
+		perCall  tools.ClientFor
+		codexFor bool
+		claude   *claudeSession
+	)
+	sid := getenv("CLAUDE_CODE_SESSION_ID")
+	switch {
+	case *outbound && codexSessionServer(cfg, getenv):
 		sessions := newSessionPuppets(cfg, getenv, stderr)
-		perCall = &sessionClients{key: cfg, puppets: sessions, byThread: map[string]*sockclient.Client{}}
+		perCall, codexFor = (&sessionClients{key: cfg, puppets: sessions, byThread: map[string]*sockclient.Client{}}).For, true
 		if *codexIn {
 			go newCodexInbound(cfg, sessions, getenv, stderr).Run(ctx)
 		}
-	} else if *codexIn {
+	case *claudeIn && claudeSessionServer(cfg, sid):
+		claude = newClaudeSession(cfg, newSessionPuppets(cfg, getenv, stderr), sid, getenv, stderr)
+		perCall = claude.For
+	case *codexIn:
 		_, _ = fmt.Fprintln(stderr, "sock-mcp:", errCodexInboundNeedsKey)
 	}
 	if perCall == nil {
@@ -232,11 +254,16 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 		}
 	}
 	client := sockclient.New(cfg, version)
+	if *claudeIn && claude == nil {
+		// no machine key or no session id: the project's puppet listens
+		claude = newClaudeSession(cfg, nil, sid, getenv, stderr)
+		claude.fixed(client)
+	}
 	opts := &mcp.ServerOptions{}
 	if *outbound {
 		opts.Instructions = outboundInstructions
 	}
-	if perCall != nil {
+	if codexFor {
 		opts.Capabilities = &mcp.ServerCapabilities{Experimental: map[string]any{sandboxStateMeta: map[string]any{}}}
 	}
 	if *channelMode {
@@ -283,7 +310,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: version}, opts)
 	if perCall != nil {
-		tools.RegisterOutboundFor(s, perCall.For, policy)
+		tools.RegisterOutboundFor(s, perCall, policy)
 	} else if *outbound {
 		tools.RegisterOutbound(s, client, policy)
 	} else {
@@ -292,6 +319,23 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	ss, err := s.Connect(ctx, tr, nil)
 	if err != nil {
 		return err
+	}
+	if claude != nil {
+		if claude.inbox.Socket == "" {
+			_, _ = fmt.Fprintln(stderr, "sock-mcp: --claude-inbound: no session inbox (CLAUDE_CODE_MESSAGING_SOCKET), so the owner's replies wait at the hub")
+		} else {
+			// The session's end archives its puppet: wait for that, briefly.
+			lctx, lcancel := context.WithCancel(ctx)
+			done := make(chan struct{})
+			go func() { defer close(done); claude.Run(lctx) }()
+			defer func() {
+				lcancel()
+				select {
+				case <-done:
+				case <-time.After(10 * time.Second):
+				}
+			}()
+		}
 	}
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- ss.Wait() }()

@@ -262,14 +262,14 @@ func (l *codexInbound) push(threadID string, c *sockclient.Client, counts *chann
 			return nil
 		}
 		conv, id := ev.Meta["conversation_id"], ev.Meta["message_id"]
-		prompt := codex.Prompt(conv, id, ev.Content)
+		prompt := channel.OwnerPrompt(conv, id, ev.Content)
 		delay := time.Second
 		for attempt := range 5 {
 			r := l.daemon.Inject(ctx, threadID, id, prompt)
 			switch r.Outcome {
 			case codex.Accepted, codex.Duplicate:
 				l.log.Info("reply put into its Codex session", "message_id", id, "thread", threadID, "outcome", r.Outcome.String(), "turn", r.Turn)
-				if err := l.ack(ctx, c, id); err != nil {
+				if err := ackOne(ctx, c, id); err != nil {
 					l.log.Warn("could not acknowledge; a redelivery is found in the thread and acknowledged then", "message_id", id, "err", err)
 					return nil
 				}
@@ -291,7 +291,8 @@ func (l *codexInbound) push(threadID string, c *sockclient.Client, counts *chann
 	}
 }
 
-func (l *codexInbound) ack(ctx context.Context, c *sockclient.Client, id string) error {
+// ackOne acknowledges one delivered message.
+func ackOne(ctx context.Context, c *sockclient.Client, id string) error {
 	_, err := sockclient.Call(ctx, c, func(ctx context.Context) (struct{}, error) {
 		_, err := c.Messaging.Ack(ctx, connect.NewRequest(&sockv1.AckRequest{MessageIds: []string{id}}))
 		return struct{}{}, err

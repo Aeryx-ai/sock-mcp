@@ -126,9 +126,12 @@ func serve(t *testing.T, f *fakeSock) func(string) string {
 	mux.Handle(p, h)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	state := t.TempDir()
+	state, config := t.TempDir(), t.TempDir()
+	// The config dir is always the test's own: the developer's real config
+	// file (a machine key beats SOCK_TOKEN, sock-client v0.1.7) must never
+	// reach a test, which would then talk to the real hub.
 	return func(k string) string {
-		return map[string]string{"SOCK_TOKEN": "sock_pt_t", "SOCK_URL": srv.URL, "XDG_STATE_HOME": state}[k]
+		return map[string]string{"SOCK_TOKEN": "sock_pt_t", "SOCK_URL": srv.URL, "XDG_STATE_HOME": state, "XDG_CONFIG_HOME": config}[k]
 	}
 }
 

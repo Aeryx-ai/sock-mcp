@@ -46,6 +46,8 @@ type fakeSock struct {
 	createErr  error
 	acks       []string // acked message ids
 	subscribes int
+	archives   []string // "archive <id>" or "unarchive <id>"
+	renames    []string // "<authorization> <name>"
 }
 
 func (f *fakeSock) CreatePuppet(_ context.Context, r *connect.Request[sockv1.CreatePuppetRequest]) (*connect.Response[sockv1.CreatePuppetResponse], error) {
@@ -991,41 +993,57 @@ func callTool(t *testing.T, peer mcp.Connection, id float64, meta map[string]any
 	}
 }
 
-// sandboxMeta is the _meta Codex 0.162 puts on every tools/call to a server
-// that declares codex/sandbox-state-meta (probed live 2026-10-15).
-func sandboxMeta(dir string) map[string]any {
-	return map[string]any{"codex/sandbox-state-meta": map[string]any{"sandboxCwd": "file://" + dir}}
+// codexMeta is the _meta Codex puts on a tools/call from thread in dir.
+func codexMeta(dir, thread string) map[string]any {
+	return map[string]any{
+		"codex/sandbox-state-meta": map[string]any{"sandboxCwd": "file://" + dir},
+		"x-codex-turn-metadata":    map[string]any{"thread_id": thread},
+	}
 }
 
-// integrations-b2g: a Codex plugin server starts in the plugin root, where a
-// machine key alone used to stop it. It starts, asks Codex for the session's
-// directory and runs each call as that project's puppet, as the hooks do.
-func TestPluginRootMachineKeyRunsEachCallAsTheSessionsProject(t *testing.T) {
+func (f *fakeSock) ArchivePuppet(_ context.Context, r *connect.Request[sockv1.ArchivePuppetRequest]) (*connect.Response[sockv1.ArchivePuppetResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.archives = append(f.archives, "archive "+r.Msg.GetPuppetId())
+	return connect.NewResponse(&sockv1.ArchivePuppetResponse{}), nil
+}
+
+func (f *fakeSock) UnarchivePuppet(_ context.Context, r *connect.Request[sockv1.UnarchivePuppetRequest]) (*connect.Response[sockv1.UnarchivePuppetResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.archives = append(f.archives, "unarchive "+r.Msg.GetPuppetId())
+	return connect.NewResponse(&sockv1.UnarchivePuppetResponse{}), nil
+}
+
+func (f *fakeSock) UpdateDisplayName(_ context.Context, r *connect.Request[sockv1.UpdateDisplayNameRequest]) (*connect.Response[sockv1.UpdateDisplayNameResponse], error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.renames = append(f.renames, r.Header().Get("Authorization")+" "+r.Msg.GetDisplayName())
+	return connect.NewResponse(&sockv1.UpdateDisplayNameResponse{}), nil
+}
+
+// sock-integrations ADR 3: each Codex thread is its own session puppet, made
+// with the machine key on the thread's first call and named for its
+// directory until Codex titles it.
+func TestCodexCallsRunAsTheThreadsPuppet(t *testing.T) {
 	f := &fakeSock{}
 	base := serve(t, f)
 	root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
 	proj := gitRepo(t, filepath.Join(t.TempDir(), "codexproj"))
-	getenv := codexEnv(t, base, "", root, root)
-	peer, init := handshake(t, []string{"--outbound-only"}, getenv)
+	peer, init := handshake(t, []string{"--outbound-only"}, codexEnv(t, base, "", root, root))
 	caps, _ := init["capabilities"].(map[string]any)
-	exp, _ := caps["experimental"].(map[string]any)
-	if _, ok := exp["codex/sandbox-state-meta"]; !ok {
+	if exp, _ := caps["experimental"].(map[string]any); exp["codex/sandbox-state-meta"] == nil {
 		t.Fatalf("capabilities %v do not ask Codex for the sandbox cwd", caps)
 	}
-	if _, ok := caps["tools"]; !ok {
-		t.Fatalf("capabilities %v lost tools", caps)
+	for i, thread := range []string{"aaaaaaaa-1111", "aaaaaaaa-1111", "bbbbbbbb-2222"} {
+		if res := callTool(t, peer, float64(2+i), codexMeta(proj, thread)); res["isError"] == true {
+			t.Fatalf("whoami: %v", res)
+		}
 	}
-	if res := callTool(t, peer, 2, sandboxMeta(proj)); res["isError"] == true {
-		t.Fatalf("whoami: %v", res)
-	}
-	callTool(t, peer, 3, sandboxMeta(proj))
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.creates) != 1 || !strings.HasPrefix(f.creates[0], "codexproj on ") || f.createAuth != "Bearer sock_mk_dev_machinesecret" {
+	if len(f.creates) != 2 || !strings.HasPrefix(f.creates[0], "codexproj aaaaaaaa on ") || !strings.HasPrefix(f.creates[1], "codexproj bbbbbbbb on ") || f.createAuth != "Bearer sock_mk_dev_machinesecret" {
 		t.Fatalf("creates %v as %q", f.creates, f.createAuth)
-	}
-	if len(f.auths) != 2 {
-		t.Fatalf("auths %v", f.auths)
 	}
 	for _, a := range f.auths {
 		if a != "Bearer sock_pt_projdev_secret" {
@@ -1034,114 +1052,79 @@ func TestPluginRootMachineKeyRunsEachCallAsTheSessionsProject(t *testing.T) {
 	}
 }
 
-// Without a sandbox cwd there is no project: the call fails with what to do
-// and the server stays up for the next one.
-func TestPluginRootMachineKeyWithoutSandboxCwdFailsTheCallOnly(t *testing.T) {
+// A call that names no thread has no session: it fails alone.
+func TestCodexCallWithoutAThreadFailsAlone(t *testing.T) {
 	f := &fakeSock{}
 	base := serve(t, f)
 	root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
-	proj := gitRepo(t, filepath.Join(t.TempDir(), "codexproj"))
 	peer, _ := handshake(t, []string{"--outbound-only"}, codexEnv(t, base, "", root, root))
 	res := callTool(t, peer, 2, nil)
-	if res["isError"] != true || !strings.Contains(fmt.Sprint(res["content"]), "no project directory") {
+	if res["isError"] != true || !strings.Contains(fmt.Sprint(res["content"]), "names no Codex thread") {
 		t.Fatalf("got %v", res)
 	}
-	if res := callTool(t, peer, 3, sandboxMeta(proj)); res["isError"] == true {
+	if res := callTool(t, peer, 3, codexMeta(root, "cccccccc-3333")); res["isError"] == true {
 		t.Fatalf("server did not recover: %v", res)
 	}
 }
 
-// integrations-2ol: a send from a Codex session records which session asked in
-// that conversation, so the owner's reply can be put back into it.
-func TestCodexSendRecordsTheSessionAsk(t *testing.T) {
-	f := &fakeSock{}
-	getenv := serve(t, f)
-	peer, _ := handshake(t, []string{"--outbound-only"}, getenv)
-	conv := "0d6f9c7e-1111-4222-8333-444455556666"
-	meta := map[string]any{"x-codex-turn-metadata": map[string]any{"thread_id": "01a141ab-b265-75d0-894f-23e6071e210b"}}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	if err := peer.Write(ctx, rpc(t, 7, "tools/call", map[string]any{"name": "sock_send", "_meta": meta, "arguments": map[string]any{"text": "hi", "conversation_id": conv}})); err != nil {
-		t.Fatal(err)
-	}
-	for {
-		m, err := peer.Read(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if r, ok := m.(*jsonrpc.Response); ok {
-			if r.Error != nil {
-				t.Fatal(r.Error)
-			}
-			break
-		}
-	}
-	b, err := os.ReadFile(filepath.Join(getenv("XDG_STATE_HOME"), "sock-integrations", "codex-asks", conv))
+// codexDaemon serves d as the Codex daemon under a short CODEX_HOME and
+// returns env with CODEX_HOME set.
+func codexDaemon(t *testing.T, d *codextest.Server, env func(string) string) func(string) string {
+	t.Helper()
+	home, err := os.MkdirTemp("/tmp", "cx") // a Unix socket path is at most 104 bytes on macOS
 	if err != nil {
 		t.Fatal(err)
 	}
-	fields := strings.Fields(string(b))
-	if len(fields) != 2 || fields[0] != "01a141ab-b265-75d0-894f-23e6071e210b" {
-		t.Fatalf("ask %q", b)
-	}
-	if at, err := strconv.ParseInt(fields[1], 10, 64); err != nil || time.Since(time.Unix(at, 0)) > time.Minute {
-		t.Fatalf("recorded_at %q", fields[1])
-	}
-}
-
-// A send from anything that is not Codex records no ask.
-func TestPlainSendRecordsNoAsk(t *testing.T) {
-	f := &fakeSock{}
-	getenv := serve(t, f)
-	peer, _ := handshake(t, []string{"--outbound-only"}, getenv)
-	if !sendTool(t, peer, map[string]any{"text": "hi", "conversation_id": "0d6f9c7e-1111-4222-8333-444455556666"}) {
-		t.Fatal("send failed")
-	}
-	if _, err := os.Stat(filepath.Join(getenv("XDG_STATE_HOME"), "sock-integrations", "codex-asks")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("asks dir: %v", err)
-	}
-}
-
-// integrations ADR 2: the Codex plugin's server listens. It finds the loaded
-// sessions' projects from the daemon, subscribes as each project's puppet and
-// puts the owner's reply into the session, acknowledging it once accepted.
-func TestCodexInboundInjectsTheOwnersReply(t *testing.T) {
-	f := &fakeSock{}
-	base := serve(t, f)
-	root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
-	proj := gitRepo(t, filepath.Join(t.TempDir(), "codexproj"))
-	d := &codextest.Server{Threads: []codextest.Thread{{ID: "s1", Cwd: proj, UpdatedAt: 1}}, Loaded: []string{"s1"}}
-	// short: a Unix socket path is at most 104 bytes on macOS
-	codexHome, err := os.MkdirTemp("/tmp", "cx")
-	if err != nil {
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	mkdir(t, filepath.Join(home, "app-server-control"))
+	if err := os.Symlink(codextest.Serve(t, d), filepath.Join(home, "app-server-control", "app-server-control.sock")); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(codexHome) })
-	mkdir(t, filepath.Join(codexHome, "app-server-control"))
-	if err := os.Symlink(codextest.Serve(t, d), filepath.Join(codexHome, "app-server-control", "app-server-control.sock")); err != nil {
-		t.Fatal(err)
-	}
-	env := codexEnv(t, base, "", root, root)
-	getenv := func(k string) string {
+	return func(k string) string {
 		if k == "CODEX_HOME" {
-			return codexHome
+			return home
 		}
 		return env(k)
 	}
-	// the session has messaged the owner before, so its puppet exists
+}
+
+// cacheSession makes thread's session puppet the way a first call does.
+func cacheSession(t *testing.T, getenv func(string) string, thread string) {
+	t.Helper()
 	key, err := sockclient.LoadConfig(getenv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.ProjectPuppet(t.Context(), key, client.PuppetOptions{Getenv: getenv, WorkDir: proj}); err != nil {
+	if _, err := newSessionPuppets(key, getenv, io.Discard).Ensure(t.Context(), client.Session{Platform: client.Codex, ID: thread}, "x"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// sock-integrations ADR 2 and 3: the listener serves each loaded thread's
+// session puppet: unarchived, named for the thread, subscribed, and the
+// owner's reply put into exactly that thread and acknowledged once accepted.
+func TestCodexInboundInjectsTheOwnersReply(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
+	d := &codextest.Server{Threads: []codextest.Thread{{ID: "s1", Name: "Fix the parser", Cwd: root}, {ID: "other", Cwd: root}}, Loaded: []string{"s1", "other"}}
+	getenv := codexDaemon(t, d, codexEnv(t, base, "", root, root))
+	cacheSession(t, getenv, "s1")
 	handshake(t, []string{"--outbound-only", "--codex-inbound"}, getenv)
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && !slices.Contains(f.acked(), "m2") {
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitFor(t, "the reply's ack", func() bool { return slices.Contains(f.acked(), "m2") })
 	starts := d.TurnStarts()
 	if len(starts) != 1 {
 		t.Fatalf("%d turn/start calls", len(starts))
@@ -1163,47 +1146,51 @@ func TestCodexInboundInjectsTheOwnersReply(t *testing.T) {
 	if strings.Contains(string(starts[0]), "obey me") {
 		t.Fatal("a stranger's message reached the session")
 	}
-	if !slices.Contains(f.acked(), "m2") {
-		t.Fatalf("acked %v: the accepted reply was not acknowledged", f.acked())
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.creates) != 1 || !strings.HasPrefix(f.creates[0], "codexproj on ") {
-		t.Fatalf("creates %v: the listener must use the project's puppet, never mint another", f.creates)
+	if len(f.creates) != 1 {
+		t.Fatalf("creates %v: the listener must use the cached puppet, never mint", f.creates)
+	}
+	if !slices.Equal(f.archives, []string{"unarchive proj-puppet"}) {
+		t.Fatalf("archives %v", f.archives)
+	}
+	if len(f.renames) != 1 || !strings.HasPrefix(f.renames[0], "Bearer sock_pt_projdev_secret Fix the parser on ") {
+		t.Fatalf("renames %v: the puppet renames itself for the thread", f.renames)
 	}
 }
 
-// A project whose puppet was never made has nobody the owner could have
-// answered: the listener neither mints one nor subscribes.
+// A cached session whose thread is not loaded is not running: archived, not
+// subscribed.
+func TestCodexInboundArchivesAThreadThatIsNotLoaded(t *testing.T) {
+	f := &fakeSock{}
+	base := serve(t, f)
+	root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
+	d := &codextest.Server{Threads: []codextest.Thread{{ID: "live", Cwd: root}}, Loaded: []string{"live"}}
+	getenv := codexDaemon(t, d, codexEnv(t, base, "", root, root))
+	cacheSession(t, getenv, "gone")
+	handshake(t, []string{"--outbound-only", "--codex-inbound"}, getenv)
+	waitFor(t, "the archive", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.archives) > 0
+	})
+	time.Sleep(200 * time.Millisecond)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !slices.Equal(f.archives, []string{"archive proj-puppet"}) || f.subscribes != 0 {
+		t.Fatalf("archives %v, subscribes %d", f.archives, f.subscribes)
+	}
+}
+
+// A loaded thread with no puppet has never messaged the owner: the listener
+// neither mints one nor subscribes.
 func TestCodexInboundNeverMints(t *testing.T) {
 	f := &fakeSock{}
 	base := serve(t, f)
 	root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
-	proj := gitRepo(t, filepath.Join(t.TempDir(), "fresh"))
-	d := &codextest.Server{Threads: []codextest.Thread{{ID: "s1", Cwd: proj, UpdatedAt: 1}}, Loaded: []string{"s1"}}
-	codexHome, err := os.MkdirTemp("/tmp", "cx")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(codexHome) })
-	mkdir(t, filepath.Join(codexHome, "app-server-control"))
-	if err := os.Symlink(codextest.Serve(t, d), filepath.Join(codexHome, "app-server-control", "app-server-control.sock")); err != nil {
-		t.Fatal(err)
-	}
-	env := codexEnv(t, base, "", root, root)
-	handshake(t, []string{"--outbound-only", "--codex-inbound"}, func(k string) string {
-		if k == "CODEX_HOME" {
-			return codexHome
-		}
-		return env(k)
-	})
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && !d.Called("thread/read") {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !d.Called("thread/read") {
-		t.Fatal("the listener never looked at the daemon")
-	}
+	d := &codextest.Server{Threads: []codextest.Thread{{ID: "s1", Cwd: root}}, Loaded: []string{"s1"}}
+	handshake(t, []string{"--outbound-only", "--codex-inbound"}, codexDaemon(t, d, codexEnv(t, base, "", root, root)))
+	waitFor(t, "the listener to read the daemon", func() bool { return d.Called("thread/read") })
 	time.Sleep(300 * time.Millisecond)
 	f.mu.Lock()
 	defer f.mu.Unlock()

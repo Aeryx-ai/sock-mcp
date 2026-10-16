@@ -24,7 +24,6 @@ import (
 	client "github.com/guygrigsby/sock-client"
 	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 
-	"github.com/guygrigsby/sock-mcp/internal/asks"
 	"github.com/guygrigsby/sock-mcp/internal/channel"
 	"github.com/guygrigsby/sock-mcp/internal/replies"
 	"github.com/guygrigsby/sock-mcp/sockclient"
@@ -63,40 +62,67 @@ func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) s
 // session's sandbox state, sandboxCwd among it, in every tools/call _meta.
 const sandboxStateMeta = "codex/sandbox-state-meta"
 
-// perCallProject reports whether this is a Codex plugin server holding a
-// machine key: it starts in the plugin root, so the project is known only
-// from each call's sandboxCwd.
-func perCallProject(cfg client.Config, getenv func(string) string) bool {
+// codexSessionServer reports whether this is the Codex plugin's server
+// holding a machine key: every call names its thread, and that thread's own
+// session puppet answers it (sock-integrations ADR 3).
+func codexSessionServer(cfg client.Config, getenv func(string) string) bool {
 	return client.TokenKind(cfg.Token) == client.KindMachineKey && getenv("PLUGIN_ROOT") != "" && getenv("CLAUDE_PROJECT_DIR") == ""
 }
 
-// projectClients runs each call as the puppet of the call's sandboxCwd,
-// minting it with the machine key the first time and reusing it after. A call
-// without one gets ProjectPuppet's answer for the plugin root.
-type projectClients struct {
-	key  client.Config
-	opts client.PuppetOptions
-
-	mu    sync.Mutex
-	byDir map[string]*sockclient.Client
+// newSessionPuppets is the machine key's session puppet cache.
+func newSessionPuppets(key client.Config, getenv func(string) string, stderr io.Writer) *client.SessionPuppets {
+	ua := "sock-mcp/" + version
+	return &client.SessionPuppets{
+		API:    client.NewPuppetAPI(client.New(key, ua), client.DefaultRetrier()),
+		Dir:    client.ProjectsDir(getenv, key),
+		Host:   client.ShortHost(),
+		Rename: client.NewRename(key, ua),
+		Log:    sockclient.Prefixed(func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) }),
+	}
 }
 
-func (p *projectClients) For(ctx context.Context, req *mcp.CallToolRequest) (*sockclient.Client, error) {
-	dir := sandboxCwd(req)
+// sessionClients runs each call as the puppet of the Codex thread that made
+// it, made with the machine key on the thread's first call.
+type sessionClients struct {
+	key     client.Config
+	puppets *client.SessionPuppets
+
+	mu       sync.Mutex
+	byThread map[string]*sockclient.Client
+}
+
+var errNoThread = errors.New("permanent: this call names no Codex thread, so it has no session puppet")
+
+func (p *sessionClients) For(ctx context.Context, req *mcp.CallToolRequest) (*sockclient.Client, error) {
+	thread := codexThread(req)
+	if thread == "" {
+		return nil, errNoThread
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if c, ok := p.byDir[dir]; ok {
+	if c, ok := p.byThread[thread]; ok {
 		return c, nil
 	}
-	o := p.opts
-	o.WorkDir = dir
-	cfg, err := client.ProjectPuppet(ctx, p.key, o)
+	tok, err := p.puppets.Ensure(ctx, client.Session{Platform: client.Codex, ID: thread}, fallbackName(sandboxCwd(req), thread))
 	if err != nil {
 		return nil, err
 	}
+	cfg := p.key // the key's server and gate, the puppet's token
+	cfg.Token = tok
 	c := sockclient.New(cfg, version)
-	p.byDir[dir] = c
+	p.byThread[thread] = c
 	return c, nil
+}
+
+// fallbackName names a session that has no name yet: its directory and the
+// first 8 of its id (owner, 2026-10-15). The listener renames it once Codex
+// titles the thread.
+func fallbackName(dir, id string) string {
+	base := filepath.Base(dir)
+	if dir == "" {
+		base = "session"
+	}
+	return base + " " + id[:min(8, len(id))]
 }
 
 // codexThread is the Codex thread that made the call, from the turn metadata
@@ -189,20 +215,20 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	if err != nil {
 		return err
 	}
-	if *codexIn {
-		if client.TokenKind(cfg.Token) != client.KindMachineKey {
-			_, _ = fmt.Fprintln(stderr, "sock-mcp:", errCodexInboundNeedsKey)
-		} else if l, err := newCodexInbound(cfg, getenv, stderr); err != nil {
-			_, _ = fmt.Fprintln(stderr, "sock-mcp: no Codex inbound:", err)
-		} else {
-			go l.Run(ctx)
+	var perCall *sessionClients
+	if *outbound && codexSessionServer(cfg, getenv) {
+		sessions := newSessionPuppets(cfg, getenv, stderr)
+		perCall = &sessionClients{key: cfg, puppets: sessions, byThread: map[string]*sockclient.Client{}}
+		if *codexIn {
+			go newCodexInbound(cfg, sessions, getenv, stderr).Run(ctx)
 		}
+	} else if *codexIn {
+		_, _ = fmt.Fprintln(stderr, "sock-mcp:", errCodexInboundNeedsKey)
 	}
-	var perCall *projectClients
-	if *outbound && perCallProject(cfg, getenv) {
-		perCall = &projectClients{key: cfg, opts: po, byDir: map[string]*sockclient.Client{}}
-	} else if cfg, err = client.ProjectPuppet(ctx, cfg, po); err != nil {
-		return err
+	if perCall == nil {
+		if cfg, err = client.ProjectPuppet(ctx, cfg, po); err != nil {
+			return err
+		}
 	}
 	client := sockclient.New(cfg, version)
 	opts := &mcp.ServerOptions{}
@@ -219,17 +245,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	tr := &channel.Transport{Inner: transport}
 	policy := tools.Policy{NotifyOwner: messageOwner}
 	// Best effort: the send already posted, so a failed record is only logged.
-	repliesDir, repliesErr := replies.Dir(getenv)
-	asksDir, asksErr := asks.Dir(getenv)
-	policy.Replied = func(req *mcp.CallToolRequest, conversationID string) {
-		now := time.Now()
-		if repliesErr == nil {
-			if err := replies.Record(repliesDir, conversationID, now); err != nil {
-				_, _ = fmt.Fprintln(stderr, "sock-mcp:", err)
-			}
-		}
-		if session := codexThread(req); session != "" && asksErr == nil {
-			if err := asks.Record(asksDir, conversationID, session, now); err != nil {
+	if dir, err := replies.Dir(getenv); err == nil {
+		policy.Replied = func(_ *mcp.CallToolRequest, conversationID string) {
+			if err := replies.Record(dir, conversationID, time.Now()); err != nil {
 				_, _ = fmt.Fprintln(stderr, "sock-mcp:", err)
 			}
 		}

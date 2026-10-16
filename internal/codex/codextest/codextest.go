@@ -13,9 +13,11 @@ import (
 	"github.com/coder/websocket"
 )
 
-// Thread is a thread as thread/list returns it.
+// Thread is a thread as thread/read returns it.
 type Thread struct {
 	ID           string  `json:"id"`
+	Name         string  `json:"name,omitempty"`
+	Source       string  `json:"source,omitempty"`
 	Cwd          string  `json:"cwd"`
 	Ephemeral    bool    `json:"ephemeral"`
 	ThreadSource *string `json:"threadSource"`

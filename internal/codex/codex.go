@@ -1,8 +1,8 @@
-// Package codex puts an owner's reply into a Codex session through the Codex
+// Package codex puts an owner's reply into a Codex thread through the Codex
 // app-server daemon's control socket: JSON-RPC over a WebSocket on a Unix
 // socket. It is the anti-corruption layer between sock-mcp and the
-// app-server protocol: no Codex term leaves it except a session id
-// (sock-integrations docs/specs/codex-inbound.md, ADR 2).
+// app-server protocol: no Codex term leaves it except a thread's id, name and
+// directory (sock-integrations docs/specs/session-puppets.md).
 package codex
 
 import (
@@ -18,8 +18,6 @@ import (
 	"slices"
 
 	"github.com/coder/websocket"
-
-	client "github.com/guygrigsby/sock-client"
 )
 
 const (
@@ -27,7 +25,7 @@ const (
 	maxItems   = 2000 // user-message items scanned for a duplicate
 )
 
-var sessionRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var threadRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // Outcome is how one injection ended.
 type Outcome int
@@ -35,10 +33,11 @@ type Outcome int
 const (
 	// Accepted means turn/start took the reply; acknowledge it.
 	Accepted Outcome = iota
-	// Duplicate means a session already holds it; acknowledge it.
+	// Duplicate means the thread already holds it; acknowledge it.
 	Duplicate
-	// NoSession means no loaded session in the project; leave it pending.
-	NoSession
+	// NotLoaded means the daemon does not have the thread loaded; leave it
+	// pending until the thread runs again.
+	NotLoaded
 	// Refused means the daemon answered with an error; leave it pending.
 	Refused
 	// Unavailable means there is no daemon to talk to; leave it pending.
@@ -46,7 +45,7 @@ const (
 )
 
 func (o Outcome) String() string {
-	return [...]string{"accepted", "duplicate", "no-session", "refused", "daemon-unavailable"}[o]
+	return [...]string{"accepted", "duplicate", "not-loaded", "refused", "daemon-unavailable"}[o]
 }
 
 // Daemon is the Codex app-server daemon at Socket.
@@ -69,19 +68,17 @@ func DefaultSocket(getenv func(string) string) string {
 	return filepath.Join(home, "app-server-control", "app-server-control.sock")
 }
 
-// Reply is one owner reply for a project's sessions.
-type Reply struct {
-	Project   string // sock-client Project of the puppet's project
-	Asked     string // the session that last posted in the conversation, or ""
-	MessageID string // the sock message id, sent as clientUserMessageId
-	Prompt    string
+// Thread is a loaded interactive Codex thread: one agent session.
+type Thread struct {
+	ID   string
+	Name string // "" until Codex titles it after the first turn
+	Cwd  string
 }
 
-// Result is an injection's outcome, the session it chose ("" for none) and
-// the turn for Accepted. Reason carries ids only, for a log.
+// Result is an injection's outcome and, for Accepted, the turn. Reason carries
+// ids only, for a log.
 type Result struct {
 	Outcome Outcome
-	Session string
 	Turn    string
 	Reason  string
 }
@@ -98,8 +95,8 @@ func Prompt(conversationID, messageID, text string) string {
 
 var closeTag = regexp.MustCompile(`(?i)</\s*sock-message`)
 
-// Projects lists the projects of the daemon's loaded interactive sessions.
-func (d Daemon) Projects(ctx context.Context) ([]string, error) {
+// Threads lists the daemon's loaded interactive threads.
+func (d Daemon) Threads(ctx context.Context) ([]Thread, error) {
 	c, err := dial(ctx, d.Socket, d.Version)
 	if err != nil {
 		return nil, err
@@ -109,33 +106,67 @@ func (d Daemon) Projects(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	seen := map[string]string{}
-	var out []string
-	c.listSessions(ctx, loaded, func(s session) {
-		if p := project(ctx, seen, s.Cwd); p != "" && !slices.Contains(out, p) {
-			out = append(out, p)
+	var out []Thread
+	c.interactive(ctx, loaded, func(t thread) {
+		name := ""
+		if t.Name != nil {
+			name = *t.Name
 		}
+		out = append(out, Thread{ID: t.ID, Name: name, Cwd: t.Cwd})
 	})
 	return out, nil
 }
 
-// Inject hands r to a loaded session of r.Project: the asked session when it
-// is one, else the newest.
-func (d Daemon) Inject(ctx context.Context, r Reply) Result {
+// Inject hands prompt to threadID as a user turn. A thread that already holds
+// messageID (an earlier delivery got in) is Duplicate; one the daemon does not
+// have loaded is NotLoaded and is not resumed, since resuming would not keep
+// the settings it was started with.
+func (d Daemon) Inject(ctx context.Context, threadID, messageID, prompt string) Result {
+	if !threadRE.MatchString(threadID) {
+		return Result{Outcome: Refused, Reason: "not a thread id"}
+	}
 	c, err := dial(ctx, d.Socket, d.Version)
 	if err != nil {
 		return Result{Outcome: Unavailable, Reason: err.Error()}
 	}
 	defer c.close()
-	in := injection{root: r.Project, asked: r.Asked, messageID: r.MessageID, prompt: r.Prompt}
-	o, sess, turn, why := in.run(ctx, c)
-	return Result{Outcome: o, Session: sess, Turn: turn, Reason: why}
+	loaded, err := c.loaded(ctx)
+	if err != nil {
+		return Result{Outcome: Refused, Reason: "thread/loaded/list: " + err.Error()}
+	}
+	if !loaded[threadID] {
+		return Result{Outcome: NotLoaded}
+	}
+	dup, err := c.hasClientID(ctx, threadID, messageID)
+	if err != nil {
+		return Result{Outcome: Refused, Reason: "thread/items/list: " + err.Error()}
+	}
+	if dup {
+		return Result{Outcome: Duplicate}
+	}
+	var started struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	err = c.call(ctx, "turn/start", map[string]any{
+		"threadId":            threadID,
+		"input":               []map[string]string{{"type": "text", "text": prompt}},
+		"clientUserMessageId": messageID,
+	}, &started)
+	if err != nil {
+		return Result{Outcome: Refused, Reason: "turn/start: " + err.Error()}
+	}
+	if started.Turn.ID == "" {
+		return Result{Outcome: Refused, Reason: "turn/start returned no turn"}
+	}
+	return Result{Outcome: Accepted, Turn: started.Turn.ID}
 }
 
-// Watch calls changed once connected and again each time the daemon starts a
-// thread or one goes idle (a turn ended, which may have made the project's
-// puppet), until ctx ends (nil) or the connection drops (the error). The
-// daemon sends thread/started to every connected client.
+// Watch calls changed once connected and again each time a thread starts, goes
+// idle (a turn ended, which may have made its puppet), is renamed or closes,
+// until ctx ends (nil) or the connection drops (the error). The daemon sends
+// these to every connected client.
 func (d Daemon) Watch(ctx context.Context, changed func()) error {
 	c, err := dial(ctx, d.Socket, d.Version)
 	if err != nil {
@@ -162,142 +193,56 @@ func (d Daemon) Watch(ctx context.Context, changed func()) error {
 		if json.Unmarshal(b, &n) != nil {
 			continue
 		}
-		if n.Method == "thread/started" || (n.Method == "thread/status/changed" && n.Params.Status.Type == "idle") {
+		switch n.Method {
+		case "thread/started", "thread/name/updated", "thread/closed", "thread/archived":
 			changed()
+		case "thread/status/changed":
+			if n.Params.Status.Type == "idle" || n.Params.Status.Type == "notLoaded" {
+				changed()
+			}
 		}
 	}
 }
 
-type injection struct {
-	root, asked, messageID, prompt string
-}
-
-// run returns the outcome, the chosen session ("" when none), the turn id
-// (accepted only) and a reason for stderr carrying ids only.
-func (in injection) run(ctx context.Context, c *rpc) (Outcome, string, string, string) {
-	loaded, err := c.loaded(ctx)
-	if err != nil {
-		return Refused, "", "", "thread/loaded/list: " + err.Error()
-	}
-	sessions := in.candidates(ctx, c, loaded)
-	session := in.choose(sessions)
-	if session == "" {
-		return NoSession, "", "", ""
-	}
-	// every candidate, not only the chosen one: a retry may choose another
-	for _, s := range sessions {
-		dup, err := c.hasClientID(ctx, s.ID, in.messageID)
-		if err != nil {
-			return Refused, session, "", "thread/items/list: " + err.Error()
-		}
-		if dup {
-			return Duplicate, s.ID, "", ""
-		}
-	}
-	var started struct {
-		Turn struct {
-			ID string `json:"id"`
-		} `json:"turn"`
-	}
-	err = c.call(ctx, "turn/start", map[string]any{
-		"threadId":            session,
-		"input":               []map[string]string{{"type": "text", "text": in.prompt}},
-		"clientUserMessageId": in.messageID,
-	}, &started)
-	if err != nil {
-		return Refused, session, "", "turn/start: " + err.Error()
-	}
-	if started.Turn.ID == "" {
-		return Refused, session, "", "turn/start returned no turn"
-	}
-	return Accepted, session, started.Turn.ID, ""
-}
-
-// session is a Codex thread as this command sees it.
-type session struct {
+// thread is a Codex thread as thread/read returns it.
+type thread struct {
 	ID           string  `json:"id"`
+	Name         *string `json:"name"`
 	Cwd          string  `json:"cwd"`
 	Ephemeral    bool    `json:"ephemeral"`
 	ThreadSource *string `json:"threadSource"`
 	Source       string  `json:"source"`
-	UpdatedAt    int64   `json:"updatedAt"`
 }
 
-// interactive are the sources of threads a person types into: the TUI and
-// the Codex app both report vscode, the CLI cli.
-var interactive = []string{"cli", "vscode"}
+// interactiveSources are the sources of threads a person types into: the TUI
+// and the Codex app both report vscode, the CLI cli.
+var interactiveSources = []string{"cli", "vscode"}
 
-// candidates are the loaded interactive sessions of the project, as the
-// puppet sees it (client.Project): a nested repository is another project and
-// a linked worktree is this one. A session the daemon has not loaded is never
-// one: resuming it would not keep the settings it was started with.
-func (in injection) candidates(ctx context.Context, c *rpc, loaded map[string]bool) []session {
-	var out []session
-	seen := map[string]string{}
-	c.listSessions(ctx, loaded, func(s session) {
-		if p := project(ctx, seen, s.Cwd); p != "" && p == in.root {
-			out = append(out, s)
-		}
-	})
-	return out
-}
-
-// listSessions calls fn for each loaded interactive session: not ephemeral
-// (title generation), started by a person (source cli or vscode; the TUI and
-// the Codex app report vscode) and no other thread source. Each loaded thread
-// is read on its own: thread/list leaves out a thread with no turn yet.
-func (c *rpc) listSessions(ctx context.Context, loaded map[string]bool, fn func(session)) {
+// interactive calls fn for each loaded interactive thread: not ephemeral
+// (title generation), started by a person and no other thread source. Each
+// loaded thread is read on its own: thread/list leaves out a thread with no
+// turn yet.
+func (c *rpc) interactive(ctx context.Context, loaded map[string]bool, fn func(thread)) {
 	n := 0
 	for id := range loaded {
 		if n++; n > maxThreads {
 			return
 		}
-		if !sessionRE.MatchString(id) {
+		if !threadRE.MatchString(id) {
 			continue
 		}
 		var r struct {
-			Thread session `json:"thread"`
+			Thread thread `json:"thread"`
 		}
 		if err := c.call(ctx, "thread/read", map[string]any{"threadId": id}, &r); err != nil {
 			continue // gone since the list; the rest still count
 		}
-		s := r.Thread
-		if s.ID != id || s.Ephemeral || (s.ThreadSource != nil && *s.ThreadSource != "user") || (s.Source != "" && !slices.Contains(interactive, s.Source)) {
+		t := r.Thread
+		if t.ID != id || t.Ephemeral || (t.ThreadSource != nil && *t.ThreadSource != "user") || (t.Source != "" && !slices.Contains(interactiveSources, t.Source)) {
 			continue
 		}
-		fn(s)
+		fn(t)
 	}
-}
-
-// project is cwd's project, cached in seen; "" for a cwd that is gone or not
-// absolute.
-func project(ctx context.Context, seen map[string]string, cwd string) string {
-	if !filepath.IsAbs(cwd) {
-		return ""
-	}
-	p, ok := seen[cwd]
-	if !ok {
-		if st, err := os.Stat(cwd); err == nil && st.IsDir() {
-			p, _ = client.Project(ctx, cwd)
-		}
-		seen[cwd] = p
-	}
-	return p
-}
-
-// choose is the asked session when it is a candidate, else the newest.
-func (in injection) choose(sessions []session) string {
-	newest := ""
-	var at int64
-	for _, s := range sessions {
-		if s.ID == in.asked {
-			return s.ID
-		}
-		if newest == "" || s.UpdatedAt > at {
-			newest, at = s.ID, s.UpdatedAt
-		}
-	}
-	return newest
 }
 
 // --- JSON-RPC over the control socket's WebSocket ----------------------------
@@ -330,7 +275,7 @@ func dial(ctx context.Context, socket, version string) (*rpc, error) {
 	}
 	ws.SetReadLimit(64 << 20)
 	c := &rpc{ws: ws}
-	if err := c.call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": "sock-codex-inject", "version": version}}, nil); err != nil {
+	if err := c.call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": "sock-mcp", "version": version}}, nil); err != nil {
 		_ = ws.CloseNow()
 		return nil, errors.New("initialize failed")
 	}
@@ -401,7 +346,7 @@ func (c *rpc) loaded(ctx context.Context) (map[string]bool, error) {
 		for _, id := range page.Data {
 			out[id] = true
 		}
-		if page.NextCursor == nil || *page.NextCursor == "" || len(page.Data) == 0 {
+		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
 		}
 		cursor = page.NextCursor
@@ -409,7 +354,7 @@ func (c *rpc) loaded(ctx context.Context) (map[string]bool, error) {
 	return out, nil
 }
 
-// hasClientID reports whether the session already holds a user message whose
+// hasClientID reports whether the thread already holds a user message whose
 // clientId is id: an earlier delivery of the same sock message got in.
 func (c *rpc) hasClientID(ctx context.Context, threadID, id string) (bool, error) {
 	var cursor *string
@@ -437,7 +382,7 @@ func (c *rpc) hasClientID(ctx context.Context, threadID, id string) (bool, error
 				return true, nil
 			}
 		}
-		if page.NextCursor == nil || *page.NextCursor == "" || len(page.Data) == 0 {
+		if page.NextCursor == nil || *page.NextCursor == "" {
 			break
 		}
 		cursor = page.NextCursor

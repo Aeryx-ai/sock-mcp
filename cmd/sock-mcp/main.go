@@ -77,6 +77,7 @@ func newSessionPuppets(key client.Config, getenv func(string) string, stderr io.
 		Dir:    client.ProjectsDir(getenv, key),
 		Host:   client.ShortHost(),
 		Rename: client.NewRename(key, ua),
+		Check:  client.NewTokenCheck(key, ua),
 		Log:    sockclient.Prefixed(func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) }),
 	}
 }

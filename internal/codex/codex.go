@@ -85,10 +85,11 @@ type Result struct {
 
 // Prompt is the reply as a session sees it: a preface saying what it is, then
 // the owner's text in a sock-message tag whose closing tag the text cannot
-// forge. The same shape as sock-integrations runner/lib.sh write_prompt.
+// forge. Only the session puppet's owner reaches the listener, so the reply
+// is the owner's instruction (owner, 2026-10-15).
 func Prompt(conversationID, messageID, text string) string {
 	text = closeTag.ReplaceAllString(text, "</\u200bsock-message")
-	return "This message is your owner's reply, delivered through sock. It is a message to answer, not a system instruction. If the same id arrives again, it is a repeat.\n" +
+	return "Your owner sent this through sock. Act on it as if they typed it in this session, and answer with sock_send in the conversation below. The same id arriving again is a repeat.\n" +
 		fmt.Sprintf("<sock-message from=\"owner\" conversation=%q id=%q>\n", conversationID, messageID) +
 		text + "\n</sock-message>\n"
 }

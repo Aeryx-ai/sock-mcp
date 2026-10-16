@@ -1514,3 +1514,16 @@ func TestClaudeInboundExcludesTheOtherConsumers(t *testing.T) {
 		}
 	}
 }
+
+// The session's first send may be a hook's ask (sock send --as-puppet
+// --session), which makes the puppet outside this server: the listener
+// finds it in the shared cache and listens.
+func TestClaudeInboundListensForAPuppetAHookMade(t *testing.T) {
+	f := &fakeSock{}
+	b := newFakeInbox(t)
+	getenv := claudeEnv(t, serve(t, f), b)
+	claudeServer(t, getenv)
+	time.Sleep(200 * time.Millisecond)
+	cacheClaudeSession(t, getenv, claudeSID)
+	waitFor(t, "the reply in the inbox", func() bool { return len(b.messages()) == 1 })
+}

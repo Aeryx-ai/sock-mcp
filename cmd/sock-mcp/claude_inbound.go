@@ -130,10 +130,8 @@ func (s *claudeSession) Run(ctx context.Context) {
 		defer unlock()
 		s.reconcile(ctx)
 	}
-	select {
-	case <-ctx.Done():
+	if !s.waitReady(ctx) {
 		return
-	case <-s.ready:
 	}
 	if s.sessions != nil {
 		s.setArchived(ctx, false)
@@ -147,6 +145,36 @@ func (s *claudeSession) Run(ctx context.Context) {
 		s.mu.Unlock()
 	}
 	s.listen(ctx)
+}
+
+// cachePoll is how often a session without a puppet looks for one a hook
+// made: a local file read.
+const cachePoll = 2 * time.Second
+
+// waitReady waits until the session has a puppet: made by a tool call here,
+// or by a hook's sock send into the shared cache. False when ctx ended.
+func (s *claudeSession) waitReady(ctx context.Context) bool {
+	t := time.NewTicker(cachePoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-s.ready:
+			return true
+		case <-t.C:
+			if s.sessions == nil {
+				continue
+			}
+			s.mu.Lock()
+			if s.c == nil {
+				if tok := s.sessions.Cached(s.session); tok != "" {
+					s.setClient(tok)
+				}
+			}
+			s.mu.Unlock()
+		}
+	}
 }
 
 // listen subscribes as the session's puppet and puts each of its owner's

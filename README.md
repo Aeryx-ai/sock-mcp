@@ -1,6 +1,6 @@
 # sock-mcp
 
-MCP server that lets an agent message through [sock](https://github.com/guygrigsby/sock-contract) as a puppet. Stdio transport, built on the official Go SDK.
+MCP server that lets an agent message through [sock](https://github.com/aeryx-ai/sock-contract) as a puppet. Stdio transport, built on the official Go SDK.
 
 ## Setup
 
@@ -26,7 +26,7 @@ Create a puppet in the sock app, copy its token, and register the server with yo
 
 ## Machine key
 
-With a machine key (`sock_mk_…`, from `sock machine-key create`) as `SOCK_TOKEN`, or as `machine_key` in the config file (`sock machine-key create --label <host> | sock machine-key use`), `sock-mcp` makes and caches one puppet per project ([ADR 10](https://github.com/guygrigsby/sock-contract/blob/main/docs/adr/0010-machine-keys-mint-project-puppets.md)) and runs as it: the key only reaches the hub to make, list and erase the puppets it made. The project is the repository holding `CLAUDE_PROJECT_DIR` (else the working directory). Without `CLAUDE_PROJECT_DIR`, a working directory outside any git repository or inside `PLUGIN_ROOT` names no project: a Codex plugin server starts in the plugin cache, so `sock-mcp` mints nothing there and, with the machine key from the file, uses the file's `puppet_token` (one puppet for every project), or fails without one. A machine key from `SOCK_TOKEN` there fails: the file is never mixed in. Register `sock-mcp` in Codex's `config.toml` (`[mcp_servers.sock]`), which starts it in the project, for a puppet per project. Every worktree of a repository shares one puppet, named `<project> on <host>`. Tokens are cached under `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets/` (mode 600) and puppets of repositories that no longer exist are erased at start, at most once every 6 hours per cache.
+With a machine key (`sock_mk_…`, from `sock machine-key create`) as `SOCK_TOKEN`, or as `machine_key` in the config file (`sock machine-key create --label <host> | sock machine-key use`), `sock-mcp` makes and caches one puppet per project ([ADR 10](https://github.com/aeryx-ai/sock-contract/blob/main/docs/adr/0010-machine-keys-mint-project-puppets.md)) and runs as it: the key only reaches the hub to make, list and erase the puppets it made. The project is the repository holding `CLAUDE_PROJECT_DIR` (else the working directory). Without `CLAUDE_PROJECT_DIR`, a working directory outside any git repository or inside `PLUGIN_ROOT` names no project: a Codex plugin server starts in the plugin cache, so `sock-mcp` mints nothing there and, with the machine key from the file, uses the file's `puppet_token` (one puppet for every project), or fails without one. A machine key from `SOCK_TOKEN` there fails: the file is never mixed in. Register `sock-mcp` in Codex's `config.toml` (`[mcp_servers.sock]`), which starts it in the project, for a puppet per project. Every worktree of a repository shares one puppet, named `<project> on <host>`. Tokens are cached under `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets/` (mode 600) and puppets of repositories that no longer exist are erased at start, at most once every 6 hours per cache.
 
 ## Outbound only
 

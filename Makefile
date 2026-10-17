@@ -40,7 +40,7 @@ ifneq ($(PINS),)
 			perl -e 'rename($$ARGV[0], $$ARGV[1]) or -d $$ARGV[1] or die "$$ARGV[1]: $$!\n"' "$$tmp" "$$dir"; \
 			rm -rf "$$tmp"; \
 		fi; \
-		echo "replace github.com/guygrigsby/sock-$$m => $$dir" >> $$work; \
+		echo "replace github.com/$$(if [ $$m = contract ]; then echo aeryx-ai; else echo guygrigsby; fi)/sock-$$m => $$dir" >> $$work; \
 	done; \
 	mv $$work .pins/go.work
 endif

@@ -2,18 +2,16 @@ module github.com/guygrigsby/sock-mcp
 
 go 1.26.9
 
-replace github.com/guygrigsby/sock-contract => ../contract
+replace github.com/aeryx-ai/sock-contract => ../contract
 
 require (
 	connectrpc.com/connect v1.21.0
-	github.com/guygrigsby/sock-contract v0.5.0
+	github.com/aeryx-ai/sock-contract v0.5.0
+	github.com/coder/websocket v1.8.14
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 )
 
-require (
-	github.com/BurntSushi/toml v1.6.0 // indirect
-	github.com/coder/websocket v1.8.14 // indirect
-)
+require github.com/BurntSushi/toml v1.6.0 // indirect
 
 require (
 	github.com/google/jsonschema-go v0.4.3 // indirect

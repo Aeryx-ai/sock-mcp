@@ -22,8 +22,8 @@ import (
 	"connectrpc.com/connect"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	sockv1 "github.com/aeryx-ai/sock-contract/gen/go/sock/v1"
 	client "github.com/guygrigsby/sock-client"
-	sockv1 "github.com/guygrigsby/sock-contract/gen/go/sock/v1"
 
 	"github.com/guygrigsby/sock-mcp/internal/channel"
 	"github.com/guygrigsby/sock-mcp/internal/replies"

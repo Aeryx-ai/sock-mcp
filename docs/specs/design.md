@@ -12,7 +12,7 @@ Puppet device (`sock_pt_…`). Human session tokens (`sock_st_…`) are accepted
 
 ## Config
 
-`SOCK_TOKEN` (required) and `SOCK_URL` (default `https://api.sock.aeryx.ai`). Env only: MCP hosts launch servers with an `env` block. Validated by `sock-client`: https unless loopback, no credentials in the URL, token prefix and no whitespace. Errors never echo the URL or token. The token is sent only to the configured host, and redirects are never followed.
+`SOCK_TOKEN` (required) and `SOCK_URL` (default `https://api.joinsock.com`). Env only: MCP hosts launch servers with an `env` block. Validated by `sock-client`: https unless loopback, no credentials in the URL, token prefix and no whitespace. Errors never echo the URL or token. The token is sent only to the configured host, and redirects are never followed.
 
 ## Tools
 

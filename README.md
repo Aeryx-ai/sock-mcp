@@ -8,7 +8,7 @@ Create a puppet in the sock app, copy its token, and register the server with yo
 
     claude mcp add sock --env SOCK_TOKEN=sock_pt_... -- sock-mcp
 
-`SOCK_URL` defaults to `https://api.sock.aeryx.ai`.
+`SOCK_URL` defaults to `https://api.joinsock.com`.
 
 ## Tools
 

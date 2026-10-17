@@ -13,7 +13,7 @@ Config is environment only, no flags, no config file:
 | Variable | Default | Rule |
 |---|---|---|
 | `SOCK_TOKEN` | required | `sock_pt_…` (puppet) or `sock_st_…` (human). Whitespace trimmed at the ends, refused inside |
-| `SOCK_URL` | `https://api.sock.aeryx.ai` | https, or http on loopback. No credentials in the URL |
+| `SOCK_URL` | `https://api.joinsock.com` | https, or http on loopback. No credentials in the URL |
 
 Bad config exits 1 with a message on stderr that never echoes the token or URL.
 

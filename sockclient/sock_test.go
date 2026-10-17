@@ -18,7 +18,7 @@ func env(m map[string]string) func(string) string { return func(k string) string
 
 func TestLoadConfig(t *testing.T) {
 	c, err := LoadConfig(env(map[string]string{"SOCK_TOKEN": "sock_pt_abc\n"}), nil)
-	if err != nil || c.Token != "sock_pt_abc" || c.URL != "https://api.sock.aeryx.ai" {
+	if err != nil || c.Token != "sock_pt_abc" || c.URL != client.DefaultURL {
 		t.Fatalf("got %+v, %v", c, err)
 	}
 	c, err = LoadConfig(env(map[string]string{"SOCK_TOKEN": "sock_pt_abc", "SOCK_URL": "http://127.0.0.1:8080"}), nil)

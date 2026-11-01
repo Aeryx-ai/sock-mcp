@@ -2,10 +2,10 @@ name: ci
 on:
   push:
     branches: [main]
-    # beads and docs alone build nothing: no run for an issue or doc update
-    paths-ignore: ['.beads/**', 'docs/**', '**/*.md']
+    # docs alone build nothing: no run for a doc update
+    paths-ignore: ['docs/**', '**/*.md']
   pull_request:
-    paths-ignore: ['.beads/**', 'docs/**', '**/*.md']
+    paths-ignore: ['docs/**', '**/*.md']
 # one run per ref: a newer push cancels the older run (Actions minutes are capped)
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -1,6 +1,36 @@
 # sock-mcp
 
-MCP server that lets an agent message through [sock](https://github.com/aeryx-ai/sock-contract) as a puppet. Stdio transport, built on the official Go SDK.
+Sock is messaging between people and the agents, or puppets, that act for them. People and puppets talk in conversations on a hub; the hosted hub is at `api.joinsock.com` and the site is [joinsock.com](https://joinsock.com).
+
+This repo is `sock-mcp`, an MCP server that lets an agent message through Sock as a puppet. It uses the stdio transport and is built on the official Go MCP SDK. It speaks the [sock-contract](https://github.com/aeryx-ai/sock-contract) API through [sock-client](https://github.com/aeryx-ai/sock-client).
+
+## Install
+
+```sh
+brew install aeryx-ai/tap/sock-mcp
+```
+
+or
+
+```sh
+curl -fsSL https://joinsock.com/install.sh | sh
+```
+
+or
+
+```sh
+go install github.com/aeryx-ai/sock-mcp/cmd/sock-mcp@latest
+```
+
+## Build and test
+
+```sh
+make          # build bin/sock-mcp
+make test     # race tests
+make check    # gofmt, vet on darwin, linux and windows, golangci-lint, tests
+```
+
+The build expects [sock-contract](https://github.com/aeryx-ai/sock-contract) and [sock-client](https://github.com/aeryx-ai/sock-client) checked out beside this repo as `../contract` and `../client`. `make` builds against the tags named in `.contract-ref` and `.client-ref`; `make check-head` builds against the checkouts' HEAD instead.
 
 ## Setup
 
@@ -18,7 +48,7 @@ Create a puppet in the sock app, copy its token, and register the server with yo
 
 `sock_send` without `conversation_id` (NotifyOwner) messages the owner when `SOCK_MCP_MESSAGE_OWNER` is exactly `1` or `true` in sock-mcp's environment, and is otherwise refused with a `permanent:` error before anything reaches the hub. The Claude Code plugin sets it from its `message_owner` option, on by default. `sock-mcp` reads it once at start and removes it, so no child process inherits it; no tool argument or message text turns it on.
 
-`sock_send` with a `conversation_id` always goes through, the owner's direct conversation included. Volume to the owner is bounded at the hub either way: ADR 20 rate limits puppet posts into the owner's direct, per puppet and per owner, and answers `RATE_LIMITED` with `Retry-After`.
+`sock_send` with a `conversation_id` always goes through, the owner's direct conversation included. Volume to the owner is bounded at the hub either way: the hub rate limits puppet posts into the owner's direct, per puppet and per owner, and answers `RATE_LIMITED` with `Retry-After`.
 
 ## Configuration
 
@@ -26,7 +56,7 @@ Create a puppet in the sock app, copy its token, and register the server with yo
 
 ## Machine key
 
-With a machine key (`sock_mk_…`, from `sock machine-key create`) as `SOCK_TOKEN`, or as `machine_key` in the config file (`sock machine-key create --label <host> | sock machine-key use`), `sock-mcp` makes and caches one puppet per project ([ADR 10](https://github.com/aeryx-ai/sock-contract/blob/main/docs/adr/0010-machine-keys-mint-project-puppets.md)) and runs as it: the key only reaches the hub to make, list and erase the puppets it made. The project is the repository holding `CLAUDE_PROJECT_DIR` (else the working directory). Without `CLAUDE_PROJECT_DIR`, a working directory outside any git repository or inside `PLUGIN_ROOT` names no project: a Codex plugin server starts in the plugin cache, so `sock-mcp` mints nothing there and, with the machine key from the file, uses the file's `puppet_token` (one puppet for every project), or fails without one. A machine key from `SOCK_TOKEN` there fails: the file is never mixed in. Register `sock-mcp` in Codex's `config.toml` (`[mcp_servers.sock]`), which starts it in the project, for a puppet per project. Every worktree of a repository shares one puppet, named `<project> on <host>`. Tokens are cached under `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets/` (mode 600) and puppets of repositories that no longer exist are erased at start, at most once every 6 hours per cache.
+With a machine key (`sock_mk_…`, from `sock machine-key create`) as `SOCK_TOKEN`, or as `machine_key` in the config file (`sock machine-key create --label <host> | sock machine-key use`), `sock-mcp` makes and caches one puppet per project and runs as it: the key only reaches the hub to make, list and erase the puppets it made. The project is the repository holding `CLAUDE_PROJECT_DIR` (else the working directory). Without `CLAUDE_PROJECT_DIR`, a working directory outside any git repository or inside `PLUGIN_ROOT` names no project: a Codex plugin server starts in the plugin cache, so `sock-mcp` mints nothing there and, with the machine key from the file, uses the file's `puppet_token` (one puppet for every project), or fails without one. A machine key from `SOCK_TOKEN` there fails: the file is never mixed in. Register `sock-mcp` in Codex's `config.toml` (`[mcp_servers.sock]`), which starts it in the project, for a puppet per project. Every worktree of a repository shares one puppet, named `<project> on <host>`. Tokens are cached under `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets/` (mode 600) and puppets of repositories that no longer exist are erased at start, at most once every 6 hours per cache.
 
 ## Outbound only
 
@@ -36,7 +66,7 @@ With `--channel` the server offers MCP protocol versions only up to 2025-11-25. 
 
 ## Claude Code inbox (`--claude-inbound`)
 
-`sock-mcp --outbound-only --claude-inbound` is the Claude Code plugin's server. With a machine key it runs as the session's own puppet (`CLAUDE_CODE_SESSION_ID`), made on the session's first tool call, named for the project until the session gets a `/rename` title and archived when the server exits. Without a machine key it serves the tools only: every session would be one puppet and each would act on every reply. Once the session's puppet exists it subscribes, and each reply from its owner (never a `SOCK_CHANNEL_ALLOW` sender) is written into the session through the inbox Claude Code hands its MCP servers (`CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`) and acknowledged when the inbox took it. No channel flag is needed. One server per session listens (a run lock under the puppet cache); a starting server archives the puppets of Claude Code sessions whose server died. Decision: [sock-integrations ADR 4](https://github.com/aeryx-ai/sock-integrations/blob/main/docs/adr/0004-claude-replies-enter-through-the-session-inbox.md).
+`sock-mcp --outbound-only --claude-inbound` is the Claude Code plugin's server. With a machine key it runs as the session's own puppet (`CLAUDE_CODE_SESSION_ID`), made on the session's first tool call, named for the project until the session gets a `/rename` title and archived when the server exits. Without a machine key it serves the tools only: every session would be one puppet and each would act on every reply. Once the session's puppet exists it subscribes, and each reply from its owner (never a `SOCK_CHANNEL_ALLOW` sender) is written into the session through the inbox Claude Code hands its MCP servers (`CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`) and acknowledged when the inbox took it. No channel flag is needed. One server per session listens (a run lock under the puppet cache); a starting server archives the puppets of Claude Code sessions whose server died.
 
 ## Claude Code channel
 
@@ -48,4 +78,10 @@ A message is pushed at most 5 times without being acted on, counted across resta
 
 A puppet whose sessions never act keeps every message queued until the hub deletes it 30 days after it was sent. The hub's `Subscribe` and `FetchPending` read only the 500 oldest pending messages, so once 500 sit unacknowledged a newer one, the owner's next reply included, reaches no session until older ones are acknowledged or expire. Messages from senders off the allowlist (other members of a group) are never pushed: the channel acknowledges and drops them as they arrive, so they do not count toward the 500, and `sock_fetch` will not see them. Clear a backlog with `sock_fetch` then `sock_ack`.
 
-MIT licensed.
+## More
+
+- Docs: https://joinsock.com/docs
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [SECURITY.md](SECURITY.md)
+
+MIT licensed. See [LICENSE](LICENSE).

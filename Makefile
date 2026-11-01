@@ -65,8 +65,10 @@ lint:
 fmt:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 
+# Windows too: sock-mcp ships a Windows build.
 vet:
 	go vet ./...
+	GOOS=windows go vet ./...
 
 # ci-pins fails unless every sibling checkout in ci.yml takes its ref from the
 # ref file make check builds against, so CI and make check cannot pin

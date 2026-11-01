@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -283,26 +282,13 @@ func openRunLock(dir string, sess client.Session) (*os.File, error) {
 	return os.OpenFile(runLockPath(dir, sess), os.O_RDWR|os.O_CREATE, 0o600)
 }
 
-// runLock blocks until this process holds sess's run lock. The operating
-// system frees a dead holder's lock.
+// runLock blocks until this process holds sess's run lock.
 func runLock(ctx context.Context, dir string, sess client.Session) (func(), error) {
 	f, err := openRunLock(dir, sess)
 	if err != nil {
 		return nil, err
 	}
-	done := make(chan error, 1)
-	go func() { done <- syscall.Flock(int(f.Fd()), syscall.LOCK_EX) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		return func() { _ = f.Close() }, nil
-	case <-ctx.Done():
-		_ = f.Close() // the blocked flock returns with the file closed
-		return nil, ctx.Err()
-	}
+	return lockFile(ctx, f)
 }
 
 // tryRunLock takes sess's run lock without waiting. held reports that a
@@ -312,7 +298,7 @@ func tryRunLock(dir string, sess client.Session) (unlock func(), held bool) {
 	if err != nil {
 		return nil, true // unknown: leave it be
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := tryLockExclusive(f); err != nil {
 		_ = f.Close()
 		return nil, true
 	}

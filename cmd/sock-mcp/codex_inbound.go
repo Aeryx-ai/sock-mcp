@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -94,19 +93,7 @@ func (l *codexInbound) lock(ctx context.Context) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	done := make(chan error, 1)
-	go func() { done <- syscall.Flock(int(f.Fd()), syscall.LOCK_EX) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		return func() { _ = f.Close() }, nil
-	case <-ctx.Done():
-		_ = f.Close() // the blocked flock returns with the file closed
-		return nil, ctx.Err()
-	}
+	return lockFile(ctx, f)
 }
 
 // watch asks for a rescan when connected and whenever a thread changes,

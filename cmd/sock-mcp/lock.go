@@ -19,7 +19,7 @@ func lockFile(ctx context.Context, f *os.File) (func(), error) {
 		}
 		return func() { _ = f.Close() }, nil
 	case <-ctx.Done():
-		_ = f.Close() // the blocked lock call returns with the file closed
+		_ = f.Close() // frees a blocked flock; a blocked LockFileEx waits out the holder
 		return nil, ctx.Err()
 	}
 }

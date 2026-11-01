@@ -25,10 +25,9 @@ import (
 )
 
 // claudeSession is a Claude Code plugin server with --claude-inbound and a
-// machine key (sock-integrations ADR 3 and ADR 4): every call runs as the
-// session's own puppet, made on its first call. Once that puppet exists, the
-// owner's replies to it are written into the session's inbox and
-// acknowledged.
+// machine key: every call runs as the session's own puppet, made on its first
+// call. Once that puppet exists, the owner's replies to it are written into
+// the session's inbox and acknowledged.
 type claudeSession struct {
 	key      client.Config
 	sessions *client.SessionPuppets

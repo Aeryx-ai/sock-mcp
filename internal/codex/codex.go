@@ -2,7 +2,7 @@
 // app-server daemon's control socket: JSON-RPC over a WebSocket on a Unix
 // socket. It is the anti-corruption layer between sock-mcp and the
 // app-server protocol: no Codex term leaves it except a thread's id, name and
-// directory (sock-integrations docs/specs/session-puppets.md).
+// directory.
 package codex
 
 import (

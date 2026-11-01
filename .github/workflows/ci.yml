@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: mcp
-      # ADR 1: build against tagged sock-contract and sock-client. The tags
+      # Build against tagged sock-contract and sock-client. The tags
       # live in mcp/.contract-ref and mcp/.client-ref, which make check also
       # builds against; bump them deliberately, in the change that starts
       # using what the new tag adds.

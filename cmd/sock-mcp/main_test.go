@@ -458,7 +458,7 @@ func TestChannelInitializeStillNegotiatesTheLegacyRevision(t *testing.T) {
 	}
 }
 
-// integrations-bof (ADR 10): with a machine key as the credential, sock-mcp
+// With a machine key as the credential, sock-mcp
 // runs as the project's own puppet.
 func machineKeyEnv(t *testing.T, base func(string) string) (func(string) string, string) {
 	t.Helper()
@@ -1033,7 +1033,7 @@ func (f *fakeSock) UpdateDisplayName(_ context.Context, r *connect.Request[sockv
 	return connect.NewResponse(&sockv1.UpdateDisplayNameResponse{}), nil
 }
 
-// sock-integrations ADR 3: each Codex thread is its own session puppet, made
+// Each Codex thread is its own session puppet, made
 // with the machine key on the thread's first call and named for its
 // directory until Codex titles it.
 func TestCodexCallsRunAsTheThreadsPuppet(t *testing.T) {
@@ -1123,7 +1123,7 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// sock-integrations ADR 2 and 3: the listener serves each loaded thread's
+// The listener serves each loaded thread's
 // session puppet: unarchived, named for the thread, subscribed, and the
 // owner's reply put into exactly that thread and acknowledged once accepted.
 func TestCodexInboundInjectsTheOwnersReply(t *testing.T) {
@@ -1377,7 +1377,7 @@ func claudeServer(t *testing.T, getenv func(string) string) (mcp.Connection, fun
 	return peer, stop
 }
 
-// sock-integrations ADR 3: a Claude Code session is its own puppet, made with
+// A Claude Code session is its own puppet, made with
 // the machine key on its first call and named for its project until the
 // owner names the session.
 func TestClaudeCallsRunAsTheSessionsPuppet(t *testing.T) {
@@ -1401,7 +1401,7 @@ func TestClaudeCallsRunAsTheSessionsPuppet(t *testing.T) {
 	}
 }
 
-// sock-integrations ADR 4: the owner's reply to the session's puppet is
+// The owner's reply to the session's puppet is
 // written into the session's inbox, with its auth line, and acknowledged; a
 // stranger's never reaches the session.
 func TestClaudeInboundPutsTheOwnersReplyInTheInbox(t *testing.T) {

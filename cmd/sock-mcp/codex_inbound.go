@@ -20,13 +20,12 @@ import (
 	"github.com/aeryx-ai/sock-mcp/sockclient"
 )
 
-// codexInbound is the Codex plugin server's listener (sock-integrations ADR 2
-// and ADR 3). Of every such server on the machine, the one holding the lock
-// listens: each cached Codex session puppet whose thread the daemon has loaded
-// is unarchived, subscribed to and its owner's replies put into exactly that
-// thread; one whose thread is not loaded is archived. The rest wait on the
-// lock and take over when its session ends; the operating system frees a dead
-// holder's lock.
+// codexInbound is the Codex plugin server's listener. Of every such server on
+// the machine, the one holding the lock listens: each cached Codex session
+// puppet whose thread the daemon has loaded is unarchived, subscribed to and
+// its owner's replies put into exactly that thread; one whose thread is not
+// loaded is archived. The rest wait on the lock and take over when its
+// session ends; the operating system frees a dead holder's lock.
 type codexInbound struct {
 	key      client.Config // the machine key: its server, and the archive calls
 	sessions *client.SessionPuppets

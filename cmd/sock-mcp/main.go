@@ -54,7 +54,7 @@ func legacyHandshakeVersions() []string {
 }
 
 // projectPuppet is sock-client's ProjectPuppet with sock-mcp's options: a
-// machine key becomes the token of this project's puppet (ADR 10).
+// machine key becomes the token of this project's puppet.
 func projectPuppet(ctx context.Context, cfg client.Config, getenv func(string) string, stderr io.Writer) (client.Config, error) {
 	return client.ProjectPuppet(ctx, cfg, puppetOptions(getenv, stderr))
 }
@@ -65,7 +65,7 @@ const sandboxStateMeta = "codex/sandbox-state-meta"
 
 // codexSessionServer reports whether this is the Codex plugin's server
 // holding a machine key: every call names its thread, and that thread's own
-// session puppet answers it (sock-integrations ADR 3).
+// session puppet answers it.
 func codexSessionServer(cfg client.Config, getenv func(string) string) bool {
 	return client.TokenKind(cfg.Token) == client.KindMachineKey && getenv("PLUGIN_ROOT") != "" && getenv("CLAUDE_PROJECT_DIR") == ""
 }
@@ -85,7 +85,7 @@ func newSessionPuppets(key client.Config, getenv func(string) string, stderr io.
 
 // claudeSessionServer reports whether a Claude Code plugin server can run as
 // its session's own puppet: it holds a machine key and Claude Code named the
-// session (sock-integrations ADR 3).
+// session.
 func claudeSessionServer(cfg client.Config, sid string) bool {
 	_, err := client.ParseSession(string(client.ClaudeCode) + ":" + sid)
 	return client.TokenKind(cfg.Token) == client.KindMachineKey && err == nil
@@ -173,8 +173,8 @@ const outboundInstructions = "This server is outbound only: it has sock_send, so
 
 // ownerEnv lets this session message the owner without a conversation. It is
 // set in the server's config (the Claude Code plugin's message_owner option);
-// nothing a model controls can set it. The hub's owner-direct rate limit
-// (ADR 20) bounds what an opted-in session sends.
+// nothing a model controls can set it. The hub's owner-direct rate limit bounds
+// what an opted-in session sends.
 const ownerEnv = "SOCK_MCP_MESSAGE_OWNER"
 
 // takeMessageOwner reports whether ownerEnv is exactly "1" or "true" (what

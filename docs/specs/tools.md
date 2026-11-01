@@ -2,7 +2,7 @@
 
 Consumers (plugin, hook and SDK packaging) build against this file. Design rationale: [design.md](design.md). Schemas below are what `tools/list` returns; field names are stable.
 
-The `tools` and `sockclient` packages are importable (`github.com/aeryx-ai/sock-mcp/tools`, `.../sockclient`); sock-mcpd links them.
+The `tools` and `sockclient` packages are importable (`github.com/aeryx-ai/sock-mcp/tools`, `.../sockclient`).
 
 ## Run
 
@@ -45,7 +45,7 @@ Internal retry: 4 attempts, 500ms doubling, capped 10s, `Retry-After` honored (s
 
 Failure is an MCP tool result with `isError: true` and one text content item. The text always starts with exactly one of:
 
-- `transient: ` retrying later can succeed. Covers `unavailable`, deadline exceeded and `RATE_LIMITED`, after the internal retries are spent. A `RATE_LIMITED` whose `Retry-After` is past the 10s retry cap is not retried: it fails at once and the text names the wait (`try again in 10m0s`), or says `try again later` when the hub sent none. The hub limits a puppet's posts into its owner's direct conversation ([ADR 20](../../../contract/docs/adr/0020-puppet-messages-to-their-owner-are-rate-limited.md)).
+- `transient: ` retrying later can succeed. Covers `unavailable`, deadline exceeded and `RATE_LIMITED`, after the internal retries are spent. A `RATE_LIMITED` whose `Retry-After` is past the 10s retry cap is not retried: it fails at once and the text names the wait (`try again in 10m0s`), or says `try again later` when the hub sent none. The hub limits a puppet's posts into its owner's direct conversation.
 - `permanent: ` retrying the same call will not help. Covers `TOKEN_INVALID`, `CALLER_NOT_ALLOWED`, `ACCOUNT_SUSPENDED`, `TERMS_NOT_ACCEPTED`, `NOT_FOUND`, `NOT_A_MEMBER`, `FIELD_INVALID`, `IDEMPOTENCY_MISMATCH`.
 
 After the prefix is human-readable text; do not parse it. Examples: `transient: sending too fast; try again in 10m0s`, `permanent: the server rejected the token; set SOCK_TOKEN to a current puppet token`. Hooks that must never block the agent: call with a timeout, ignore any `isError`, and optionally log it.
@@ -84,4 +84,4 @@ In channel mode, do not also run a `sock_fetch`/`sock_ack` hook against the same
 
 ## Outbound only
 
-`--outbound-only` registers only `sock_whoami`, `sock_list_conversations` and `sock_send`, without the consuming fields: `sock_send` takes no `message_ids` and acks nothing, and `sock_whoami` has no `pending_unacked`, since an outbound session owns no deliveries. Its `tools/list` is pinned byte for byte in `tools/testdata/outbound_tools.golden.json`, which sock-mcpd's golden matches. `sock_fetch` and `sock_ack` consume deliveries, so an agent beside `sock listen` (one consumer per puppet) must not see them, and a host without a tool filter (a Codex plugin's `mcp.json`) needs the server to enforce it. Combined with `--channel` it is a usage error, since the channel consumes deliveries. The initialize `instructions` say the inbound tools are absent on purpose. Default behavior is unchanged.
+`--outbound-only` registers only `sock_whoami`, `sock_list_conversations` and `sock_send`, without the consuming fields: `sock_send` takes no `message_ids` and acks nothing, and `sock_whoami` has no `pending_unacked`, since an outbound session owns no deliveries. Its `tools/list` is pinned byte for byte in `tools/testdata/outbound_tools.golden.json`. `sock_fetch` and `sock_ack` consume deliveries, so an agent beside `sock listen` (one consumer per puppet) must not see them, and a host without a tool filter (a Codex plugin's `mcp.json`) needs the server to enforce it. Combined with `--channel` it is a usage error, since the channel consumes deliveries. The initialize `instructions` say the inbound tools are absent on purpose. Default behavior is unchanged.

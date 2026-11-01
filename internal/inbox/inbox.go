@@ -1,7 +1,7 @@
 // Package inbox writes a user message into a running Claude Code session
 // through the session's inbox: the Unix socket Claude Code hands its MCP
 // servers as CLAUDE_CODE_MESSAGING_SOCKET, with CLAUDE_CODE_MESSAGING_TOKEN
-// as the auth line (sock-integrations ADR 4).
+// as the auth line.
 package inbox
 
 import (

@@ -363,7 +363,7 @@ func TestTransportPushWritesNotification(t *testing.T) {
 	}
 }
 
-// A read marker (ADR 9), an event with no kind set and a kind from a newer
+// A read marker, an event with no kind set and a kind from a newer
 // contract (field 99, unknown to this build) are passed over: nothing is
 // pushed or acked for them, the stream stays up and the message after them
 // arrives.

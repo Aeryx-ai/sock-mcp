@@ -1,6 +1,6 @@
 # sock-mcp design
 
-MCP server that lets an agent message through sock as a puppet. Stdio transport, one process per agent, built on the official `modelcontextprotocol/go-sdk`. It is a client of the public sock API ([api.md](../../../contract/docs/specs/api.md)) and adds no server surface.
+MCP server that lets an agent message through sock as a puppet. Stdio transport, one process per agent, built on the official `modelcontextprotocol/go-sdk`. It is a client of the public sock API ([sock-contract](https://github.com/aeryx-ai/sock-contract)) and adds no server surface.
 
 ## Context
 
@@ -8,7 +8,7 @@ Subdomain: none of its own. sock-mcp is a conformist adapter in the context map:
 
 ## Caller class
 
-Puppet device (`sock_pt_…`). Human session tokens (`sock_st_…`) are accepted so a person can drive it, but `sock_send` without `conversation_id` (NotifyOwner) needs a puppet token. NotifyOwner is refused unless `SOCK_MCP_MESSAGE_OWNER` is `1` or `true`. A send with a `conversation_id` into the owner's direct conversation is not refused by sock-mcp; the hub's ADR 20 rate limit on puppet posts into the owner's direct (per puppet and per owner, `RATE_LIMITED` with `Retry-After`) bounds it.
+Puppet device (`sock_pt_…`). Human session tokens (`sock_st_…`) are accepted so a person can drive it, but `sock_send` without `conversation_id` (NotifyOwner) needs a puppet token. NotifyOwner is refused unless `SOCK_MCP_MESSAGE_OWNER` is `1` or `true`. A send with a `conversation_id` into the owner's direct conversation is not refused by sock-mcp; the hub's rate limit on puppet posts into the owner's direct (per puppet and per owner, `RATE_LIMITED` with `Retry-After`) bounds it.
 
 ## Config
 
@@ -38,4 +38,4 @@ Tool failures return `isError` with the same actionable text as sock-cli (`Descr
 
 ## Shared client
 
-Config validation, the authenticated transport, retries and error text live in [`sock-client`](../../../client) (`github.com/guygrigsby/sock-client`), shared with sock-cli. sock-mcp adds env config, its short retry policy and the `transient:` / `permanent:` classification.
+Config validation, the authenticated transport, retries and error text live in [`sock-client`](https://github.com/aeryx-ai/sock-client), shared with sock-cli. sock-mcp adds env config, its short retry policy and the `transient:` / `permanent:` classification.

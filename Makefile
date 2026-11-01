@@ -4,7 +4,7 @@ LDFLAGS := -X main.version=$(VERSION)
 .DEFAULT_GOAL := build
 .PHONY: build test install redeploy check lint fmt vet check-head ci-pins pins dist
 
-# Pins (ADR 1): every go target builds against the sock-contract and
+# Pins: every go target builds against the sock-contract and
 # sock-client tags in .contract-ref and .client-ref, the tags CI checks out,
 # not whatever the sibling checkouts have at HEAD. make pins clones each tag
 # once under PIN_CACHE, from the sibling checkout (fetching the tag when it

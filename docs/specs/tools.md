@@ -2,7 +2,7 @@
 
 Consumers (plugin, hook and SDK packaging) build against this file. Design rationale: [design.md](design.md). Schemas below are what `tools/list` returns; field names are stable.
 
-The `tools` and `sockclient` packages are importable (`github.com/guygrigsby/sock-mcp/tools`, `.../sockclient`); sock-mcpd links them.
+The `tools` and `sockclient` packages are importable (`github.com/aeryx-ai/sock-mcp/tools`, `.../sockclient`); sock-mcpd links them.
 
 ## Run
 

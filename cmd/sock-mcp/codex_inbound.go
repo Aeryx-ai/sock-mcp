@@ -15,9 +15,9 @@ import (
 	sockv1 "github.com/aeryx-ai/sock-contract/gen/go/sock/v1"
 	client "github.com/guygrigsby/sock-client"
 
-	"github.com/guygrigsby/sock-mcp/internal/channel"
-	"github.com/guygrigsby/sock-mcp/internal/codex"
-	"github.com/guygrigsby/sock-mcp/sockclient"
+	"github.com/aeryx-ai/sock-mcp/internal/channel"
+	"github.com/aeryx-ai/sock-mcp/internal/codex"
+	"github.com/aeryx-ai/sock-mcp/sockclient"
 )
 
 // codexInbound is the Codex plugin server's listener (sock-integrations ADR 2

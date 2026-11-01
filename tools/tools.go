@@ -16,7 +16,7 @@ import (
 
 	sockv1 "github.com/aeryx-ai/sock-contract/gen/go/sock/v1"
 
-	"github.com/guygrigsby/sock-mcp/sockclient"
+	"github.com/aeryx-ai/sock-mcp/sockclient"
 )
 
 // fetchDefault and fetchMax bound sock_fetch; the API allows up to 500.

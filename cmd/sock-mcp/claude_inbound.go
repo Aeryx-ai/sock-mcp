@@ -19,9 +19,9 @@ import (
 
 	client "github.com/guygrigsby/sock-client"
 
-	"github.com/guygrigsby/sock-mcp/internal/channel"
-	"github.com/guygrigsby/sock-mcp/internal/inbox"
-	"github.com/guygrigsby/sock-mcp/sockclient"
+	"github.com/aeryx-ai/sock-mcp/internal/channel"
+	"github.com/aeryx-ai/sock-mcp/internal/inbox"
+	"github.com/aeryx-ai/sock-mcp/sockclient"
 )
 
 // claudeSession is a Claude Code plugin server with --claude-inbound and a

@@ -21,8 +21,8 @@ import (
 
 	client "github.com/guygrigsby/sock-client"
 
-	"github.com/guygrigsby/sock-mcp/sockclient"
-	"github.com/guygrigsby/sock-mcp/tools"
+	"github.com/aeryx-ai/sock-mcp/sockclient"
+	"github.com/aeryx-ai/sock-mcp/tools"
 )
 
 const token = "sock_pt_test"

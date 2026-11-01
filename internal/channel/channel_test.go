@@ -27,7 +27,7 @@ import (
 
 	client "github.com/guygrigsby/sock-client"
 
-	"github.com/guygrigsby/sock-mcp/sockclient"
+	"github.com/aeryx-ai/sock-mcp/sockclient"
 )
 
 const owner = "owner-1"

@@ -25,10 +25,10 @@ import (
 	sockv1 "github.com/aeryx-ai/sock-contract/gen/go/sock/v1"
 	client "github.com/guygrigsby/sock-client"
 
-	"github.com/guygrigsby/sock-mcp/internal/channel"
-	"github.com/guygrigsby/sock-mcp/internal/replies"
-	"github.com/guygrigsby/sock-mcp/sockclient"
-	"github.com/guygrigsby/sock-mcp/tools"
+	"github.com/aeryx-ai/sock-mcp/internal/channel"
+	"github.com/aeryx-ai/sock-mcp/internal/replies"
+	"github.com/aeryx-ai/sock-mcp/sockclient"
+	"github.com/aeryx-ai/sock-mcp/tools"
 )
 
 var version = "dev"

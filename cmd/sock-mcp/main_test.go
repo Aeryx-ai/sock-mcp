@@ -29,9 +29,9 @@ import (
 	"github.com/aeryx-ai/sock-contract/gen/go/sock/v1/sockv1connect"
 	client "github.com/guygrigsby/sock-client"
 
-	"github.com/guygrigsby/sock-mcp/internal/channel"
-	"github.com/guygrigsby/sock-mcp/internal/codex/codextest"
-	"github.com/guygrigsby/sock-mcp/sockclient"
+	"github.com/aeryx-ai/sock-mcp/internal/channel"
+	"github.com/aeryx-ai/sock-mcp/internal/codex/codextest"
+	"github.com/aeryx-ai/sock-mcp/sockclient"
 )
 
 type fakeSock struct {

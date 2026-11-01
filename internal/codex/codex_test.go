@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guygrigsby/sock-mcp/internal/codex/codextest"
+	"github.com/aeryx-ai/sock-mcp/internal/codex/codextest"
 )
 
 const msgID = "1c7e4d3b-2a5f-4d9b-8e3c-6f7a8b9c0d1e"

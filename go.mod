@@ -1,4 +1,4 @@
-module github.com/guygrigsby/sock-mcp
+module github.com/aeryx-ai/sock-mcp
 
 go 1.26.9
 

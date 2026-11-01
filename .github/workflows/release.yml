@@ -65,7 +65,7 @@ jobs:
       - working-directory: tap
         shell: bash
         run: |
-          scripts/update.sh formula sock-mcp
+          scripts/update.sh formula sock-mcp "${GITHUB_REF_NAME#v}"
           git add -A
           git diff --cached --quiet && { echo "Formula/sock-mcp.rb already at ${GITHUB_REF_NAME#v}"; exit 0; }
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \

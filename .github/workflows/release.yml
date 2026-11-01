@@ -1,0 +1,90 @@
+name: release
+# A vX.Y.Z tag publishes the five sock-mcp archives to downloads.joinsock.com
+# (latest/mcp-<os>-<arch>.json) and points the Homebrew formula at them.
+on:
+  push:
+    tags: ['v*']
+
+# Read-only by default; the tap job writes through its own deploy key.
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: '[[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "a release tag is vX.Y.Z, not $GITHUB_REF_NAME"; exit 1; }'
+        shell: bash
+
+  build:
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with: { path: mcp, fetch-depth: 0, persist-credentials: false }
+      # The contract and client tags this builds against live in .contract-ref
+      # and .client-ref, as for ci.yml and make check.
+      - id: pins
+        run: |
+          echo "contract=$(cat mcp/.contract-ref)" >> "$GITHUB_OUTPUT"
+          echo "client=$(cat mcp/.client-ref)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with: { repository: aeryx-ai/sock-contract, path: contract, ref: '${{ steps.pins.outputs.contract }}', ssh-key: '${{ secrets.CONTRACT_DEPLOY_KEY }}', persist-credentials: false }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with: { repository: guygrigsby/sock-client, path: client, ref: '${{ steps.pins.outputs.client }}', ssh-key: '${{ secrets.CLIENT_DEPLOY_KEY }}', persist-credentials: false }
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with: { go-version-file: mcp/go.mod }
+      - run: make dist
+        working-directory: mcp
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with: { name: dist, path: 'mcp/bin/dist/*', if-no-files-found: error }
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with: { repository: guygrigsby/sock-website, path: website, ssh-key: '${{ secrets.WEBSITE_DEPLOY_KEY }}', persist-credentials: false }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with: { name: dist, path: dist }
+      - env:
+          R2_SOCK_DOWNLOADS_ACCESS_KEY_ID: ${{ secrets.R2_SOCK_DOWNLOADS_ACCESS_KEY_ID }}
+          R2_SOCK_DOWNLOADS_SECRET_ACCESS_KEY: ${{ secrets.R2_SOCK_DOWNLOADS_SECRET_ACCESS_KEY }}
+          R2_SOCK_DOWNLOADS_ENDPOINT: ${{ secrets.R2_SOCK_DOWNLOADS_ENDPOINT }}
+        shell: bash
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          pids=()
+          for p in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64 windows-amd64; do
+            f=dist/sock-mcp-$p.tar.gz; [[ $p == windows-* ]] && f=dist/sock-mcp-$p.zip
+            website/scripts/publish-release.sh "mcp-$p" "$v" "$f" & pids+=($!)
+          done
+          # All finish either way; publish-release.sh reuses a file it already
+          # published, so a re-run completes whichever failed.
+          st=0; for pid in "${pids[@]}"; do wait "$pid" || st=1; done; exit $st
+
+  tap:
+    needs: publish
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      # The only checkout whose credentials persist: this job pushes the formula.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with: { repository: Aeryx-ai/homebrew-tap, path: tap, ssh-key: '${{ secrets.TAP_DEPLOY_KEY }}' }
+      - working-directory: tap
+        shell: bash
+        run: |
+          scripts/update.sh formula sock-mcp
+          git add -A
+          git diff --cached --quiet && { echo "Formula/sock-mcp.rb already at ${GITHUB_REF_NAME#v}"; exit 0; }
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "Update sock-mcp to ${GITHUB_REF_NAME#v}"
+          # sock-cli may release at the same time and push first.
+          branch=$(git branch --show-current)
+          for _ in 1 2 3 4 5; do
+            git push origin "HEAD:$branch" && exit 0
+            git pull --rebase origin "$branch"
+          done
+          echo "could not push the tap after 5 tries"; exit 1

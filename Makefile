@@ -1,8 +1,8 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION ?= $(patsubst v%,%,$(shell git describe --tags --always --dirty 2>/dev/null || echo dev))
 LDFLAGS := -X main.version=$(VERSION)
 
 .DEFAULT_GOAL := build
-.PHONY: build test install redeploy check lint fmt vet check-head ci-pins pins
+.PHONY: build test install redeploy check lint fmt vet check-head ci-pins pins dist
 
 # Pins (ADR 1): every go target builds against the sock-contract and
 # sock-client tags in .contract-ref and .client-ref, the tags CI checks out,
@@ -85,3 +85,23 @@ check: ci-pins fmt vet lint test
 
 check-head:
 	$(MAKE) check PINS=
+
+# dist cross-builds the release archives publish-release.sh uploads, one per
+# platform, all at once: sock-mcp-<os>-<arch>.tar.gz (.zip on Windows) holding the
+# binary and LICENSE at the archive root. The release workflow runs this.
+DIST_PLATFORMS := darwin-arm64 darwin-amd64 linux-arm64 linux-amd64 windows-amd64
+
+dist: pins
+	rm -rf bin/dist bin/dist-stage
+	$(MAKE) -j$(words $(DIST_PLATFORMS)) $(addprefix dist-,$(DIST_PLATFORMS)) VERSION=$(VERSION)
+	rm -rf bin/dist-stage
+
+# Inside dist-%: $* is <os>-<arch>.
+dist_os = $(word 1,$(subst -, ,$*))
+dist_exe = sock-mcp$(if $(filter windows,$(dist_os)),.exe)
+
+dist-%:
+	mkdir -p bin/dist bin/dist-stage/$*
+	CGO_ENABLED=0 GOOS=$(dist_os) GOARCH=$(word 2,$(subst -, ,$*)) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/dist-stage/$*/$(dist_exe) ./cmd/sock-mcp
+	cp LICENSE bin/dist-stage/$*/
+	$(if $(filter windows,$(dist_os)),cd bin/dist-stage/$* && zip -qX ../../dist/sock-mcp-$*.zip $(dist_exe) LICENSE,COPYFILE_DISABLE=1 tar -czf bin/dist/sock-mcp-$*.tar.gz -C bin/dist-stage/$* $(dist_exe) LICENSE)

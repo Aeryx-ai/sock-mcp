@@ -11,7 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	client "github.com/guygrigsby/sock-client"
+	client "github.com/aeryx-ai/sock-client"
 )
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }

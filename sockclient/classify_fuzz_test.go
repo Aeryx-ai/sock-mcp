@@ -11,7 +11,7 @@ import (
 
 	sockv1 "github.com/aeryx-ai/sock-contract/gen/go/sock/v1"
 
-	client "github.com/guygrigsby/sock-client"
+	client "github.com/aeryx-ai/sock-client"
 )
 
 // FuzzClassify checks every error gets exactly one of the two prefixes, the

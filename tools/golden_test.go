@@ -9,7 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	client "github.com/guygrigsby/sock-client"
+	client "github.com/aeryx-ai/sock-client"
 
 	"github.com/aeryx-ai/sock-mcp/sockclient"
 	"github.com/aeryx-ai/sock-mcp/tools"

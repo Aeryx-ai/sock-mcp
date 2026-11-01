@@ -22,23 +22,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-        with: { path: mcp, fetch-depth: 0, persist-credentials: false }
-      # The contract and client tags this builds against live in .contract-ref
-      # and .client-ref, as for ci.yml and make check.
-      - id: pins
-        run: |
-          echo "contract=$(cat mcp/.contract-ref)" >> "$GITHUB_OUTPUT"
-          echo "client=$(cat mcp/.client-ref)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-        with: { repository: aeryx-ai/sock-contract, path: contract, ref: '${{ steps.pins.outputs.contract }}', ssh-key: '${{ secrets.CONTRACT_DEPLOY_KEY }}', persist-credentials: false }
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-        with: { repository: guygrigsby/sock-client, path: client, ref: '${{ steps.pins.outputs.client }}', ssh-key: '${{ secrets.CLIENT_DEPLOY_KEY }}', persist-credentials: false }
+        with: { fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
-        with: { go-version-file: mcp/go.mod }
+        with: { go-version-file: go.mod }
       - run: make dist
-        working-directory: mcp
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with: { name: dist, path: 'mcp/bin/dist/*', if-no-files-found: error }
+        with: { name: dist, path: 'bin/dist/*', if-no-files-found: error }
 
   publish:
     needs: build

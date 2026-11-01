@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	client "github.com/guygrigsby/sock-client"
+	client "github.com/aeryx-ai/sock-client"
 )
 
 // Client is the two sock services plus the retry policy tool calls use.

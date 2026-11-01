@@ -17,31 +17,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: mcp
-      # Build against tagged sock-contract and sock-client. The tags
-      # live in mcp/.contract-ref and mcp/.client-ref, which make check also
-      # builds against; bump them deliberately, in the change that starts
-      # using what the new tag adds.
-      - id: pins
-        run: |
-          echo "contract=$(cat mcp/.contract-ref)" >> "$GITHUB_OUTPUT"
-          echo "client=$(cat mcp/.client-ref)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
-        with:
-          repository: aeryx-ai/sock-contract
-          ref: ${{ steps.pins.outputs.contract }}
-          path: contract
-          ssh-key: ${{ secrets.CONTRACT_DEPLOY_KEY }}
-      - uses: actions/checkout@v4
-        with:
-          repository: guygrigsby/sock-client
-          ref: ${{ steps.pins.outputs.client }}
-          path: client
-          ssh-key: ${{ secrets.CLIENT_DEPLOY_KEY }}
       - uses: actions/setup-go@v5
         with:
-          go-version-file: mcp/go.mod
+          go-version-file: go.mod
       - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
       - run: make check
-        working-directory: mcp

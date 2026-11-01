@@ -17,7 +17,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	client "github.com/guygrigsby/sock-client"
+	client "github.com/aeryx-ai/sock-client"
 
 	"github.com/aeryx-ai/sock-mcp/internal/channel"
 	"github.com/aeryx-ai/sock-mcp/internal/inbox"

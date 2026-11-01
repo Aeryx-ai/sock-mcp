@@ -30,7 +30,7 @@ make test     # race tests
 make check    # gofmt, vet on darwin, linux and windows, golangci-lint, tests
 ```
 
-The build expects [sock-contract](https://github.com/aeryx-ai/sock-contract) and [sock-client](https://github.com/aeryx-ai/sock-client) checked out beside this repo as `../contract` and `../client`. `make` builds against the tags named in `.contract-ref` and `.client-ref`; `make check-head` builds against the checkouts' HEAD instead.
+go.mod pins [sock-contract](https://github.com/aeryx-ai/sock-contract) and [sock-client](https://github.com/aeryx-ai/sock-client) by tag. To build against local checkouts, add an untracked `go.work`.
 
 ## Setup
 

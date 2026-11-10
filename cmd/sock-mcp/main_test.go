@@ -790,8 +790,9 @@ func ownerSent(t *testing.T, peer mcp.Connection, f *fakeSock, what string, want
 	f.notifies, f.posts = nil, nil
 }
 
-// Owner messaging is decided at each send: SOCK_MCP_MESSAGE_OWNER when it is
-// exactly 1, true, 0 or false, else the config file's message_owner, else on.
+// Owner messaging is decided at each send: SOCK_MCP_MESSAGE_OWNER when set
+// (1, true or on is on, any other value off), else the config file's
+// message_owner, else on.
 // The file is read again for every send, so `sock settings --message-owner`
 // applies without a restart. No session signal stands in for either.
 func TestOwnerMessagingIsDecidedAtEachSend(t *testing.T) {
@@ -813,11 +814,12 @@ func TestOwnerMessagingIsDecidedAtEachSend(t *testing.T) {
 		{map[string]string{ownerEnv: "false"}, "", false},
 		{map[string]string{ownerEnv: "1"}, "message_owner = false\n", true},
 		{map[string]string{ownerEnv: "true"}, "message_owner = false\n", true},
-		// not a setting: the file decides
-		{map[string]string{ownerEnv: "TRUE"}, "message_owner = false\n", false},
-		{map[string]string{ownerEnv: "1 "}, "message_owner = false\n", false},
-		{map[string]string{ownerEnv: "yes"}, "message_owner = false\n", false},
-		{map[string]string{ownerEnv: "01"}, "", true},
+		{map[string]string{ownerEnv: "on"}, "message_owner = false\n", true},
+		// set but not on: off, whatever the file says
+		{map[string]string{ownerEnv: "TRUE"}, "message_owner = true\n", false},
+		{map[string]string{ownerEnv: "1 "}, "message_owner = true\n", false},
+		{map[string]string{ownerEnv: "off"}, "", false},
+		{map[string]string{ownerEnv: "01"}, "", false},
 		{map[string]string{"sock_mcp_message_owner": "0"}, "", true},
 	} {
 		peer, f, _ := ownerSession(t, tc.env, tc.file)
@@ -1045,7 +1047,7 @@ func TestNoCredentialStartsAndEveryToolSaysToSignIn(t *testing.T) {
 				text = res.Content[0].Text
 				break
 			}
-			if text != "permanent: not signed in: run /sock:login, then /reload-plugins" {
+			if text != "permanent: not signed in: run sock login (in Claude Code, /sock:login), then reload the plugin" {
 				t.Fatalf("%v %s: text %q", args, tool, text)
 			}
 		}

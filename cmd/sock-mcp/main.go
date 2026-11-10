@@ -455,7 +455,7 @@ var errNoReply = errors.New("no reply was posted in that conversation since then
 
 // errNotSignedIn is every tool call's answer when sock-mcp started with no
 // credential: the plugin's sign-in, then a reload, which starts sock-mcp again.
-var errNotSignedIn = errors.New("permanent: not signed in: run /sock:login, then /reload-plugins")
+var errNotSignedIn = errors.New("permanent: not signed in: run sock login (in Claude Code, /sock:login), then reload the plugin")
 
 // serveWithoutCredential serves the same tools as a signed-in sock-mcp, and
 // every call answers errNotSignedIn. No stream is opened: there is nobody to

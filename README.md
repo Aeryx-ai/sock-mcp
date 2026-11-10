@@ -54,7 +54,7 @@ Create a puppet in the sock app, copy its token, and register the server with yo
 
 `SOCK_TOKEN`, `SOCK_URL` and `SOCK_ACCESS_GATE` from the environment. When `SOCK_TOKEN` is unset (a host such as a Codex plugin starts the server without your environment), `sock-mcp` reads the `sock` CLI's config file, `$XDG_CONFIG_HOME/sock/config.toml` or `~/.config/sock/config.toml` (mode 600): `machine_key` or `puppet_token`, `url` and `access_gate`. `sock machine-key use` writes `machine_key` (see [Machine key](#machine-key)); `sock puppets use <puppet id>` mints a puppet token and writes `puppet_token`, one puppet shared by every project. The token is the first of `SOCK_TOKEN`, then `machine_key`, then `puppet_token`. The `token` that `sock login` writes is yours and is never used here. One source, never a mix: with the token from the file, the URL and gate come from the file too and an ambient `SOCK_URL` or `SOCK_ACCESS_GATE` is ignored, so the token only goes to the URL it was saved with.
 
-With no credential in either, `sock-mcp` still starts, so a plugin's tools load before anyone signs in, and every tool call answers `permanent: not signed in: run /sock:login, then /reload-plugins`.
+With no credential in either, `sock-mcp` still starts, so a plugin's tools load before anyone signs in, and every tool call answers `permanent: not signed in: run sock login (in Claude Code, /sock:login), then reload the plugin`.
 
 ## Machine key
 

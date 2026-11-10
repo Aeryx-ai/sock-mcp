@@ -70,16 +70,23 @@ func codexSessionServer(cfg client.Config, getenv func(string) string) bool {
 	return client.TokenKind(cfg.Token) == client.KindMachineKey && getenv("PLUGIN_ROOT") != "" && getenv("CLAUDE_PROJECT_DIR") == ""
 }
 
-// newSessionPuppets is the machine key's session puppet cache.
+// newSessionPuppets is the machine key's session puppet cache. A key the hub
+// rejects is replaced by the config file's new one (rekeyedPuppets); the
+// cache stays where the key the server started with put it.
 func newSessionPuppets(key client.Config, getenv func(string) string, stderr io.Writer) *client.SessionPuppets {
 	ua := "sock-mcp/" + version
+	log := sockclient.Prefixed(func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) })
+	reload := func() (client.Config, error) { return client.LoadPuppetConfig(client.PuppetOptions{Getenv: getenv}) }
+	build := func(key client.Config) client.PuppetAPI {
+		return client.NewPuppetAPI(client.New(key, ua), client.DefaultRetrier())
+	}
 	return &client.SessionPuppets{
-		API:    client.NewPuppetAPI(client.New(key, ua), client.DefaultRetrier()),
+		API:    newRekeyedPuppets(key, reload, build, log),
 		Dir:    client.ProjectsDir(getenv, key),
 		Host:   client.ShortHost(),
 		Rename: client.NewRename(key, ua),
 		Check:  client.NewTokenCheck(key, ua),
-		Log:    sockclient.Prefixed(func(f string, a ...any) { _, _ = fmt.Fprintf(stderr, f+"\n", a...) }),
+		Log:    log,
 	}
 }
 

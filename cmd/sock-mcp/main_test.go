@@ -46,6 +46,8 @@ type fakeSock struct {
 	creates              []string // puppet names asked for
 	createAuth           string
 	createErr            error
+	createAuths          []string // Authorization of each CreatePuppet
+	deadKey              string   // a machine key CreatePuppet rejects as TOKEN_INVALID
 	acks                 []string // acked message ids
 	subscribes           int
 	archives             []string // "archive <id>" or "unarchive <id>"
@@ -59,6 +61,14 @@ func (f *fakeSock) CreatePuppet(_ context.Context, r *connect.Request[sockv1.Cre
 	defer f.mu.Unlock()
 	f.creates = append(f.creates, r.Msg.GetName())
 	f.createAuth = r.Header().Get("Authorization")
+	f.createAuths = append(f.createAuths, f.createAuth)
+	if f.deadKey != "" && f.createAuth == "Bearer "+f.deadKey {
+		e := connect.NewError(connect.CodeUnauthenticated, errors.New("token invalid"))
+		if d, err := connect.NewErrorDetail(&sockv1.ErrorInfo{Reason: sockv1.ErrorReason_ERROR_REASON_TOKEN_INVALID}); err == nil {
+			e.AddDetail(d)
+		}
+		return nil, e
+	}
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -1666,4 +1676,149 @@ func TestClaudeInboundListensForAPuppetAHookMade(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	cacheClaudeSession(t, getenv, claudeSID)
 	waitFor(t, "the reply in the inbox", func() bool { return len(b.messages()) == 1 })
+}
+
+// configPath is the sock config file getenv's server reads.
+func configPath(getenv func(string) string) string {
+	return filepath.Join(getenv("XDG_CONFIG_HOME"), "sock", "config.toml")
+}
+
+// integrations-vzq: `sock machine-key use --force` replaces the key a running
+// server started with. The hub rejects the old one; the server reads the file
+// again and makes the session's puppet with the new key, without a reload.
+// A file that still holds the rejected key gets the error, after one try.
+func TestSessionPuppetsFollowAReplacedMachineKey(t *testing.T) {
+	const old, fresh = "sock_mk_dev_machinesecret", "sock_mk_dev_newsecret"
+	for name, start := range map[string]func(*testing.T, *fakeSock) (mcp.Connection, func(string) string, map[string]any){
+		"claude": func(t *testing.T, f *fakeSock) (mcp.Connection, func(string) string, map[string]any) {
+			getenv := claudeEnv(t, serve(t, f), newFakeInbox(t))
+			peer, _ := claudeServer(t, getenv)
+			return peer, getenv, nil
+		},
+		"codex": func(t *testing.T, f *fakeSock) (mcp.Connection, func(string) string, map[string]any) {
+			root := gitRepo(t, filepath.Join(t.TempDir(), "plugins", "sock", "1.0.0"))
+			proj := gitRepo(t, filepath.Join(t.TempDir(), "codexproj"))
+			getenv := codexEnv(t, serve(t, f), "", root, root)
+			peer, _ := handshake(t, []string{"--outbound-only"}, getenv)
+			return peer, getenv, codexMeta(proj, "dddddddd-4444")
+		},
+	} {
+		t.Run(name+"/replaced", func(t *testing.T) {
+			f := &fakeSock{deadKey: old}
+			peer, getenv, meta := start(t, f)
+			body, err := os.ReadFile(configPath(getenv))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeConfig(t, configPath(getenv), strings.Replace(string(body), old, fresh, 1))
+			for i := range 2 {
+				if res := callTool(t, peer, float64(2+i), meta); res["isError"] == true {
+					t.Fatalf("whoami %d: %v", i, res)
+				}
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if !slices.Equal(f.createAuths, []string{"Bearer " + old, "Bearer " + fresh}) {
+				t.Fatalf("creates as %v", f.createAuths)
+			}
+			for _, a := range f.auths {
+				if a != "Bearer sock_pt_projdev_secret" {
+					t.Fatalf("a call went out as %q", a)
+				}
+			}
+		})
+		t.Run(name+"/unchanged", func(t *testing.T) {
+			f := &fakeSock{deadKey: old}
+			peer, _, meta := start(t, f)
+			for i := range 2 {
+				res := callTool(t, peer, float64(2+i), meta)
+				if res["isError"] != true || strings.Contains(fmt.Sprint(res["content"]), "machinesecret") {
+					t.Fatalf("whoami %d: %v", i, res)
+				}
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if !slices.Equal(f.createAuths, []string{"Bearer " + old, "Bearer " + old}) {
+				t.Fatalf("creates as %v: want one try per call", f.createAuths)
+			}
+		})
+	}
+}
+
+// fakePuppetAPI answers every call with err, or with its key when err is nil.
+type fakePuppetAPI struct {
+	key   string
+	err   error
+	calls *[]string
+}
+
+func (a fakePuppetAPI) answer(call string) error {
+	*a.calls = append(*a.calls, call+" "+a.key)
+	return a.err
+}
+
+func (a fakePuppetAPI) CreatePuppet(context.Context, string, string) (string, string, error) {
+	return "id", "sock_pt_" + a.key, a.answer("create")
+}
+
+func (a fakePuppetAPI) ListPuppets(context.Context) ([]client.PuppetInfo, error) {
+	return []client.PuppetInfo{{ID: a.key}}, a.answer("list")
+}
+
+func (a fakePuppetAPI) MintPuppetToken(context.Context, string, string) (string, error) {
+	return "sock_pt_" + a.key, a.answer("mint")
+}
+
+func (a fakePuppetAPI) ErasePuppet(context.Context, string) error     { return a.answer("erase") }
+func (a fakePuppetAPI) ArchivePuppet(context.Context, string) error   { return a.answer("archive") }
+func (a fakePuppetAPI) UnarchivePuppet(context.Context, string) error { return a.answer("unarchive") }
+
+// Only a rejected key, replaced in the file by another machine key for the
+// same server, is swapped, and the call is tried once more with it. Any other
+// failure, or any other file, returns the first answer.
+func TestRekeyedPuppetsSwapOnlyAReplacedKeyForTheSameServer(t *testing.T) {
+	unauthenticated := connect.NewError(connect.CodeUnauthenticated, errors.New("no"))
+	key := client.Config{URL: "https://hub.test", Token: "sock_mk_old"}
+	for name, tc := range map[string]struct {
+		first  error
+		file   client.Config
+		read   error
+		want   []string
+		wantOK bool
+	}{
+		"replaced":             {unauthenticated, client.Config{URL: key.URL, Token: "sock_mk_new"}, nil, []string{"mint sock_mk_old", "mint sock_mk_new"}, true},
+		"same key":             {unauthenticated, key, nil, []string{"mint sock_mk_old"}, false},
+		"other server":         {unauthenticated, client.Config{URL: "https://other.test", Token: "sock_mk_new"}, nil, []string{"mint sock_mk_old"}, false},
+		"not a key":            {unauthenticated, client.Config{URL: key.URL, Token: "sock_pt_new"}, nil, []string{"mint sock_mk_old"}, false},
+		"unreadable":           {unauthenticated, client.Config{}, errors.New("config: parse"), []string{"mint sock_mk_old"}, false},
+		"not rejected":         {connect.NewError(connect.CodeUnavailable, errors.New("down")), client.Config{URL: key.URL, Token: "sock_mk_new"}, nil, []string{"mint sock_mk_old"}, false},
+		"denied, not rejected": {connect.NewError(connect.CodePermissionDenied, errors.New("no")), client.Config{URL: key.URL, Token: "sock_mk_new"}, nil, []string{"mint sock_mk_old"}, false},
+	} {
+		var calls []string
+		reads := 0
+		r := newRekeyedPuppets(key, func() (client.Config, error) { reads++; return tc.file, tc.read }, func(c client.Config) client.PuppetAPI {
+			a := fakePuppetAPI{key: c.Token, calls: &calls}
+			if c.Token == key.Token {
+				a.err = tc.first
+			}
+			return a
+		}, nil)
+		tok, err := r.MintPuppetToken(t.Context(), "id", "l")
+		if !slices.Equal(calls, tc.want) || (err == nil) != tc.wantOK {
+			t.Errorf("%s: calls %v, token %q, err %v", name, calls, tok, err)
+		}
+		if tc.wantOK && tok != "sock_pt_sock_mk_new" {
+			t.Errorf("%s: token %q", name, tok)
+		}
+		if wantReads := map[bool]int{true: 1, false: 0}[errors.Is(tc.first, unauthenticated)]; reads != wantReads {
+			t.Errorf("%s: read the file %d times, want %d", name, reads, wantReads)
+		}
+		// once swapped, the next call goes straight to the new key
+		if tc.wantOK {
+			calls = nil
+			if _, err := r.ListPuppets(t.Context()); err != nil || !slices.Equal(calls, []string{"list sock_mk_new"}) || reads != 1 {
+				t.Errorf("%s: after the swap: calls %v, reads %d, err %v", name, calls, reads, err)
+			}
+		}
+	}
 }

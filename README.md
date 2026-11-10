@@ -46,7 +46,7 @@ Create a puppet in the sock app, copy its token, and register the server with yo
 
 ## Messaging the owner
 
-`sock_send` without `conversation_id` (NotifyOwner) messages the owner when `SOCK_MCP_MESSAGE_OWNER` is exactly `1` or `true` in sock-mcp's environment, and is otherwise refused with a `permanent:` error before anything reaches the hub. The Claude Code plugin sets it from its `message_owner` option, on by default. `sock-mcp` reads it once at start and removes it, so no child process inherits it; no tool argument or message text turns it on.
+`sock_send` without `conversation_id` (NotifyOwner) messages the owner when owner messaging is on, and is otherwise refused with a `permanent:` error before anything reaches the hub. Each send decides: `SOCK_MCP_MESSAGE_OWNER` when it is exactly `1`, `true`, `0` or `false`, else `message_owner` in the `sock` CLI's config file (`sock settings --message-owner=on|off` writes it), else on. The file is read again at every such send, so a change applies without a restart. A file that cannot be read (bad mode, not valid TOML) refuses the send, unless `SOCK_MCP_MESSAGE_OWNER` decides it. `sock-mcp` reads `SOCK_MCP_MESSAGE_OWNER` once at start and removes it, so no child process inherits it; no tool argument or message text turns owner messaging on.
 
 `sock_send` with a `conversation_id` always goes through, the owner's direct conversation included. Volume to the owner is bounded at the hub either way: the hub rate limits puppet posts into the owner's direct, per puppet and per owner, and answers `RATE_LIMITED` with `Retry-After`.
 

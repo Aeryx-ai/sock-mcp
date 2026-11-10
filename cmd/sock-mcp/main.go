@@ -171,21 +171,48 @@ func puppetOptions(getenv func(string) string, stderr io.Writer) client.PuppetOp
 const outboundInstructions = "This server is outbound only: it has sock_send, sock_whoami and sock_list_conversations. " +
 	"There is no sock_fetch or sock_ack here; incoming messages are handled elsewhere, so do not look for them."
 
-// ownerEnv lets this session message the owner without a conversation. It is
-// set in the server's config (the Claude Code plugin's message_owner option);
-// nothing a model controls can set it. The hub's owner-direct rate limit bounds
-// what an opted-in session sends.
-const ownerEnv = "SOCK_MCP_MESSAGE_OWNER"
+// ownerEnv turns owner messaging on (exactly 1 or true) or off (0 or false)
+// for this server, whatever the config file's message_owner says. It is set
+// in the server's config; nothing a model controls can set it. The hub's
+// owner-direct rate limit bounds what an opted-in session sends.
+const ownerEnv = client.MessageOwnerEnvVar
 
-// takeMessageOwner reports whether ownerEnv is exactly "1" or "true" (what
-// Claude Code substitutes for a boolean plugin option) and removes it
-// from the process environment, so no child process (git, for one) inherits
-// it. main calls it once, before anything else runs.
-func takeMessageOwner() bool {
+// takeMessageOwner returns ownerEnv's value and removes it from the process
+// environment, so no child process (git, for one) inherits it. main calls it
+// once, before anything else runs.
+func takeMessageOwner() string {
 	v := os.Getenv(ownerEnv)
-	on := v == "1" || v == "true"
 	_ = os.Unsetenv(ownerEnv)
-	return on
+	return v
+}
+
+// ownerMessaging decides each owner message with sock-client's MessageOwner:
+// env (what takeMessageOwner took) when it is a setting, else the config
+// file, read again at every send so `sock settings --message-owner` applies
+// without a restart, else on. A file that cannot be read cannot say on or
+// off, so without a setting in env the send is refused rather than falling
+// to the default, which is on.
+func ownerMessaging(env string, getenv func(string) string) func() (bool, error) {
+	fromEnv := func(k string) string {
+		if k == ownerEnv {
+			return env
+		}
+		return ""
+	}
+	return func() (bool, error) {
+		var (
+			fc      client.FileConfig
+			readErr error
+		)
+		if path, err := client.DefaultConfigPath(getenv); err == nil { // no home: no file
+			fc, readErr = client.LoadFileConfig(path)
+		}
+		on, from := client.MessageOwner(fromEnv, fc)
+		if readErr != nil && from != client.MessageOwnerEnv {
+			return false, fmt.Errorf("permanent: cannot read the sock config file to decide whether this session may message the owner, so nothing was sent: %w", readErr)
+		}
+		return on, nil
+	}
 }
 
 func main() {
@@ -197,7 +224,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, args []string, getenv func(string) string, messageOwner bool, stderr io.Writer, transport mcp.Transport) error {
+func run(ctx context.Context, args []string, getenv func(string) string, messageOwner string, stderr io.Writer, transport mcp.Transport) error {
 	if len(args) > 0 && args[0] == "replied" {
 		return replied(args[1:], getenv, stderr)
 	}
@@ -271,7 +298,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, message
 	}
 	var ch *channel.Channel
 	tr := &channel.Transport{Inner: transport}
-	policy := tools.Policy{NotifyOwner: messageOwner}
+	policy := tools.Policy{OwnerMessaging: ownerMessaging(messageOwner, getenv)}
 	// Best effort: the send already posted, so a failed record is only logged.
 	if dir, err := replies.Dir(getenv); err == nil {
 		policy.Replied = func(_ *mcp.CallToolRequest, conversationID string) {

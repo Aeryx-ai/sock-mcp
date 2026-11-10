@@ -8,7 +8,7 @@ Subdomain: none of its own. sock-mcp is a conformist adapter in the context map:
 
 ## Caller class
 
-Puppet device (`sock_pt_…`). Human session tokens (`sock_st_…`) are accepted so a person can drive it, but `sock_send` without `conversation_id` (NotifyOwner) needs a puppet token. NotifyOwner is refused unless `SOCK_MCP_MESSAGE_OWNER` is `1` or `true`. A send with a `conversation_id` into the owner's direct conversation is not refused by sock-mcp; the hub's rate limit on puppet posts into the owner's direct (per puppet and per owner, `RATE_LIMITED` with `Retry-After`) bounds it.
+Puppet device (`sock_pt_…`). Human session tokens (`sock_st_…`) are accepted so a person can drive it, but `sock_send` without `conversation_id` (NotifyOwner) needs a puppet token. NotifyOwner is refused unless owner messaging is on, decided at each send by sock-client's `MessageOwner`: `SOCK_MCP_MESSAGE_OWNER` (read once at start, then removed from the environment), else the config file's `message_owner` (read again each send; unreadable refuses), else on. A send with a `conversation_id` into the owner's direct conversation is not refused by sock-mcp; the hub's rate limit on puppet posts into the owner's direct (per puppet and per owner, `RATE_LIMITED` with `Retry-After`) bounds it.
 
 ## Config
 

@@ -317,6 +317,36 @@ func TestSendKeysDifferPerCall(t *testing.T) {
 	}
 }
 
+// OwnerMessaging, when set, decides each owner message as it is sent: on
+// sends, off refuses as NotifyOwner false does, an error refuses with its text.
+func TestSendToOwnerAsksOwnerMessagingEachTime(t *testing.T) {
+	f := &fake{}
+	answers := []struct {
+		on  bool
+		err error
+	}{{true, nil}, {false, nil}, {true, errors.New("permanent: cannot read it")}, {true, nil}}
+	asked := 0
+	cs := startWith(t, f, tools.Policy{OwnerMessaging: func() (bool, error) {
+		a := answers[asked]
+		asked++
+		return a.on, a.err
+	}})
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "a"}))
+	if res := call(t, cs, "sock_send", map[string]any{"text": "b"}); !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "not configured to message the owner") {
+		t.Fatalf("off: %v", res.Content)
+	}
+	if res := call(t, cs, "sock_send", map[string]any{"text": "c"}); !res.IsError || res.Content[0].(*mcp.TextContent).Text != "permanent: cannot read it" {
+		t.Fatalf("error: %v", res.Content)
+	}
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "d"}))
+	structured(t, call(t, cs, "sock_send", map[string]any{"text": "re", "conversation_id": "c9"}))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if asked != 4 || len(f.notifies) != 2 || f.notifies[0].GetText() != "a" || f.notifies[1].GetText() != "d" || len(f.sends) != 1 {
+		t.Fatalf("asked %d, notifies %v, sends %v", asked, f.notifies, f.sends)
+	}
+}
+
 // A session not configured to message the owner never does, and nothing
 // reaches the hub.
 func TestSendToOwnerIsRefusedByDefault(t *testing.T) {

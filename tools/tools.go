@@ -30,9 +30,13 @@ const (
 // Policy is what this session's tools may do beyond replying.
 type Policy struct {
 	// NotifyOwner lets sock_send without a conversation_id message the owner.
-	// Set only from the server's config (SOCK_MCP_MESSAGE_OWNER); the zero
+	// Set only from the server's config, never from a tool call; the zero
 	// value refuses.
 	NotifyOwner bool
+	// OwnerMessaging, when set, replaces NotifyOwner: it is asked at each
+	// owner message, so a setting changed while the server runs applies to
+	// the next send. An error refuses with its text, nothing sent.
+	OwnerMessaging func() (bool, error)
 	// Acked, when set, is told of message ids once the hub has acked them.
 	Acked func(ids ...string)
 	// Replied, when set, is told the conversation of every message a send
@@ -282,13 +286,30 @@ var errNotifyOwner = errors.New("permanent: this session is not configured to me
 	"To answer a message the owner sent you, reply with that message's conversation_id; do not look up a conversation to reach the owner some other way. " +
 	"To get the owner's attention, finish your turn: the sock plugin's hooks ask the owner when a person is at this session")
 
+// mayNotifyOwner is nil when this send may message the owner, else why not.
+func (p Policy) mayNotifyOwner() error {
+	on := p.NotifyOwner
+	if p.OwnerMessaging != nil {
+		var err error
+		if on, err = p.OwnerMessaging(); err != nil {
+			return err
+		}
+	}
+	if !on {
+		return errNotifyOwner
+	}
+	return nil
+}
+
 func (h *handlers) send(ctx context.Context, req *mcp.CallToolRequest, in SendIn) (*mcp.CallToolResult, Message, error) {
 	h, err := h.at(ctx, req)
 	if err != nil {
 		return nil, Message{}, err
 	}
-	if in.ConversationID == "" && !h.p.NotifyOwner {
-		return nil, Message{}, errNotifyOwner
+	if in.ConversationID == "" {
+		if err := h.p.mayNotifyOwner(); err != nil {
+			return nil, Message{}, err
+		}
 	}
 	key := rand.Text() // one key per tool call, reused by every retry
 	m, err := sockclient.Call(ctx, h.c, func(ctx context.Context) (*sockv1.Message, error) {

@@ -154,12 +154,12 @@ func rpc(t *testing.T, id float64, method string, params any) *jsonrpc.Request {
 // after initialize, plus the initialize result.
 func handshake(t *testing.T, args []string, getenv func(string) string) (mcp.Connection, map[string]any) {
 	t.Helper()
-	return handshakeWith(t, args, getenv, false)
+	return handshakeWith(t, args, getenv, "")
 }
 
-// handshakeWith is handshake for a session that may message the owner when
-// owner is set.
-func handshakeWith(t *testing.T, args []string, getenv func(string) string, owner bool) (mcp.Connection, map[string]any) {
+// handshakeWith is handshake with owner as the SOCK_MCP_MESSAGE_OWNER main
+// took from the process environment.
+func handshakeWith(t *testing.T, args []string, getenv func(string) string, owner string) (mcp.Connection, map[string]any) {
 	t.Helper()
 	ct, st := mcp.NewInMemoryTransports()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -279,7 +279,7 @@ func TestPlainModeHasNoChannelCapability(t *testing.T) {
 
 func TestChannelFailsClosedWithoutAllowedSenders(t *testing.T) {
 	getenv := serve(t, &fakeSock{human: true})
-	err := run(t.Context(), []string{"--channel"}, getenv, false, io.Discard, &mcp.StdioTransport{})
+	err := run(t.Context(), []string{"--channel"}, getenv, "", io.Discard, &mcp.StdioTransport{})
 	if err == nil || !strings.Contains(err.Error(), "no allowed senders") {
 		t.Fatalf("err = %v", err)
 	}
@@ -356,7 +356,7 @@ func TestAllToolsByDefault(t *testing.T) {
 // the channel consumes deliveries, so it cannot be outbound only
 func TestOutboundOnlyExcludesChannel(t *testing.T) {
 	_, st := mcp.NewInMemoryTransports()
-	err := run(t.Context(), []string{"--outbound-only", "--channel"}, serve(t, &fakeSock{}), false, io.Discard, st)
+	err := run(t.Context(), []string{"--outbound-only", "--channel"}, serve(t, &fakeSock{}), "", io.Discard, st)
 	if err == nil || !strings.Contains(err.Error(), "outbound-only") {
 		t.Fatalf("err = %v", err)
 	}
@@ -379,7 +379,7 @@ func discoverVersions(t *testing.T, args []string) []string {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	getenv := serve(t, &fakeSock{})
-	go func() { _ = run(ctx, args, getenv, false, io.Discard, st) }()
+	go func() { _ = run(ctx, args, getenv, "", io.Discard, st) }()
 	peer, err := ct.Connect(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -515,7 +515,7 @@ func TestMachineKeyFailureNamesNoSecret(t *testing.T) {
 	base := serve(t, f)
 	getenv, _ := machineKeyEnv(t, base)
 	_, st := mcp.NewInMemoryTransports()
-	err := run(t.Context(), []string{"--outbound-only"}, getenv, false, io.Discard, st)
+	err := run(t.Context(), []string{"--outbound-only"}, getenv, "", io.Discard, st)
 	if err == nil || !strings.Contains(err.Error(), "puppet") || strings.Contains(err.Error(), "machinesecret") {
 		t.Fatalf("err = %v", err)
 	}
@@ -681,6 +681,13 @@ func TestEnvMachineKeyWithNoProjectDoesNotReadTheFile(t *testing.T) {
 // sendTool calls sock_send on peer and reports whether it succeeded.
 func sendTool(t *testing.T, peer mcp.Connection, args map[string]any) bool {
 	t.Helper()
+	ok, _ := sendResult(t, peer, args)
+	return ok
+}
+
+// sendResult is sendTool with the result's text.
+func sendResult(t *testing.T, peer mcp.Connection, args map[string]any) (bool, string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if err := peer.Write(ctx, rpc(t, 3, "tools/call", map[string]any{"name": "sock_send", "arguments": args})); err != nil {
@@ -696,21 +703,29 @@ func sendTool(t *testing.T, peer mcp.Connection, args map[string]any) bool {
 			continue
 		}
 		if resp.Error != nil {
-			return false
+			return false, resp.Error.Error()
 		}
 		var res struct {
 			IsError bool `json:"isError"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
 		}
 		if err := json.Unmarshal(resp.Result, &res); err != nil {
 			t.Fatal(err)
 		}
-		return !res.IsError
+		var text string
+		for _, c := range res.Content {
+			text += c.Text
+		}
+		return !res.IsError, text
 	}
 }
 
 // ownerSession starts sock-mcp the way main does, with env set in the
-// process environment first, and returns the peer and the fake hub.
-func ownerSession(t *testing.T, env map[string]string) (mcp.Connection, *fakeSock) {
+// process environment first and the config file holding file (none when ""),
+// and returns the peer, the fake hub and the config file's path.
+func ownerSession(t *testing.T, env map[string]string, file string) (mcp.Connection, *fakeSock, string) {
 	t.Helper()
 	t.Setenv(ownerEnv, "") // restored after the test
 	_ = os.Unsetenv(ownerEnv)
@@ -719,6 +734,10 @@ func ownerSession(t *testing.T, env map[string]string) (mcp.Connection, *fakeSoc
 	}
 	f := &fakeSock{}
 	base := serve(t, f)
+	path := filepath.Join(base("XDG_CONFIG_HOME"), "sock", "config.toml")
+	if file != "" {
+		writeConfig(t, path, file)
+	}
 	getenv := func(k string) string {
 		if v := base(k); v != "" {
 			return v
@@ -726,64 +745,122 @@ func ownerSession(t *testing.T, env map[string]string) (mcp.Connection, *fakeSoc
 		return os.Getenv(k)
 	}
 	peer, _ := handshakeWith(t, []string{"--outbound-only"}, getenv, takeMessageOwner())
-	return peer, f
+	return peer, f, path
 }
 
-// A session messages the owner without a conversation only when its server
-// config sets SOCK_MCP_MESSAGE_OWNER to exactly "1" or "true"; no session
-// signal stands in for it.
-func TestOwnerMessagesNeedTheOptIn(t *testing.T) {
-	refused := []map[string]string{
-		{},
-		{"CLAUDE_CODE_ENTRYPOINT": "cli"},
-		{"CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ATTENDED": "1"},
-		{"SOCK_MCP_ATTENDED": "1"},
-		{ownerEnv: "0"},
-		{ownerEnv: "TRUE"},
-		{ownerEnv: "1 "},
-		{ownerEnv: " 1"},
-		{ownerEnv: "01"},
-		{ownerEnv: "yes"},
-		{"sock_mcp_message_owner": "1"},
+// writeConfig writes body to the sock config file at path, mode 600.
+func writeConfig(t *testing.T, path, body string) {
+	t.Helper()
+	mkdir(t, filepath.Dir(path))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	for _, env := range refused {
-		peer, f := ownerSession(t, env)
-		if sendTool(t, peer, map[string]any{"text": "done"}) {
-			t.Errorf("%v: owner message sent", env)
-		}
-		if !sendTool(t, peer, map[string]any{"text": "re", "conversation_id": "c1"}) {
-			t.Errorf("%v: reply refused", env)
-		}
-		f.mu.Lock()
-		if len(f.notifies) != 0 || !slices.Equal(f.posts, []string{"c1"}) {
-			t.Errorf("%v: hub saw notifies=%v posts=%v", env, f.notifies, f.posts)
-		}
-		f.mu.Unlock()
-	}
+}
 
-	// "true" is what Claude Code substitutes for a boolean plugin option.
-	for _, v := range []string{"1", "true"} {
-		peer, f := ownerSession(t, map[string]string{ownerEnv: v})
-		if !sendTool(t, peer, map[string]any{"text": "owner"}) {
-			t.Errorf("%s=%q: owner message refused", ownerEnv, v)
+// ownerSent sends one owner message and one reply on peer and checks what
+// the hub saw since the last check: the reply always, the owner message only
+// when want.
+func ownerSent(t *testing.T, peer mcp.Connection, f *fakeSock, what string, want bool) {
+	t.Helper()
+	if got := sendTool(t, peer, map[string]any{"text": "owner"}); got != want {
+		t.Errorf("%s: owner message sent = %v, want %v", what, got, want)
+	}
+	if !sendTool(t, peer, map[string]any{"text": "re", "conversation_id": "c1"}) {
+		t.Errorf("%s: reply refused", what)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	wantNotifies := []string(nil)
+	if want {
+		wantNotifies = []string{"owner"}
+	}
+	if !slices.Equal(f.notifies, wantNotifies) || !slices.Equal(f.posts, []string{"c1"}) {
+		t.Errorf("%s: hub saw notifies=%v posts=%v", what, f.notifies, f.posts)
+	}
+	f.notifies, f.posts = nil, nil
+}
+
+// Owner messaging is decided at each send: SOCK_MCP_MESSAGE_OWNER when it is
+// exactly 1, true, 0 or false, else the config file's message_owner, else on.
+// The file is read again for every send, so `sock settings --message-owner`
+// applies without a restart. No session signal stands in for either.
+func TestOwnerMessagingIsDecidedAtEachSend(t *testing.T) {
+	peer, f, path := ownerSession(t, map[string]string{"CLAUDE_CODE_ENTRYPOINT": "cli", "SOCK_MCP_ATTENDED": "1"}, "")
+	ownerSent(t, peer, f, "no file", true)
+	writeConfig(t, path, "message_owner = false\n")
+	ownerSent(t, peer, f, "file off", false)
+	writeConfig(t, path, "message_owner = true\n")
+	ownerSent(t, peer, f, "file on", true)
+	writeConfig(t, path, "url = \"https://example.test\"\n")
+	ownerSent(t, peer, f, "file without the key", true)
+
+	for _, tc := range []struct {
+		env  map[string]string
+		file string
+		want bool
+	}{
+		{map[string]string{ownerEnv: "0"}, "message_owner = true\n", false},
+		{map[string]string{ownerEnv: "false"}, "", false},
+		{map[string]string{ownerEnv: "1"}, "message_owner = false\n", true},
+		{map[string]string{ownerEnv: "true"}, "message_owner = false\n", true},
+		// not a setting: the file decides
+		{map[string]string{ownerEnv: "TRUE"}, "message_owner = false\n", false},
+		{map[string]string{ownerEnv: "1 "}, "message_owner = false\n", false},
+		{map[string]string{ownerEnv: "yes"}, "message_owner = false\n", false},
+		{map[string]string{ownerEnv: "01"}, "", true},
+		{map[string]string{"sock_mcp_message_owner": "0"}, "", true},
+	} {
+		peer, f, _ := ownerSession(t, tc.env, tc.file)
+		ownerSent(t, peer, f, fmt.Sprintf("%v %q", tc.env, tc.file), tc.want)
+	}
+}
+
+// A config file that cannot be read cannot say owner messaging is on, so the
+// owner message is refused with why, and nothing is sent; replies still go.
+// A valid SOCK_MCP_MESSAGE_OWNER needs no file and still decides.
+func TestOwnerMessagingRefusesWhenTheFileCannotBeRead(t *testing.T) {
+	for name, body := range map[string]string{
+		"parse":    "message_owner = maybe\n",
+		"readable": "access_gate = \"gate_secret\"\nmessage_owner = true\n",
+	} {
+		peer, f, path := ownerSession(t, nil, body)
+		if name == "readable" {
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ok, text := sendResult(t, peer, map[string]any{"text": "owner"})
+		if ok || !strings.HasPrefix(text, "permanent: cannot read the sock config file to decide whether this session may message the owner, so nothing was sent: config: ") {
+			t.Errorf("%s: sent=%v text %q", name, ok, text)
+		}
+		if strings.Contains(text, "gate_secret") {
+			t.Errorf("%s: text names the gate: %q", name, text)
 		}
 		if !sendTool(t, peer, map[string]any{"text": "re", "conversation_id": "c1"}) {
-			t.Errorf("%s=%q: reply refused", ownerEnv, v)
+			t.Errorf("%s: reply refused", name)
 		}
 		f.mu.Lock()
-		if !slices.Equal(f.notifies, []string{"owner"}) || !slices.Equal(f.posts, []string{"c1"}) {
-			t.Errorf("%s=%q: hub saw notifies=%v posts=%v", ownerEnv, v, f.notifies, f.posts)
+		if len(f.notifies) != 0 {
+			t.Errorf("%s: hub saw notifies=%v", name, f.notifies)
 		}
 		f.mu.Unlock()
+
+		peer, f, path = ownerSession(t, map[string]string{ownerEnv: "1"}, body)
+		if name == "readable" {
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ownerSent(t, peer, f, name+" with the env on", true)
 	}
 }
 
 // No tool argument or message text turns owner messages on.
 func TestToolArgumentsCannotTurnOnOwnerMessages(t *testing.T) {
-	peer, f := ownerSession(t, nil)
+	peer, f, _ := ownerSession(t, nil, "message_owner = false\n")
 	for _, args := range []map[string]any{
 		{"text": "x", ownerEnv: "1"},
-		{"text": "x", "env": map[string]any{ownerEnv: "1"}, "notify_owner": true},
+		{"text": "x", "env": map[string]any{ownerEnv: "1"}, "notify_owner": true, "message_owner": true},
 		{"text": ownerEnv + "=1"},
 		{"text": "x", "conversation_id": ""},
 	} {
@@ -814,8 +891,8 @@ func TestOwnerOptInDoesNotReachChildProcesses(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(ownerEnv, "1")
 
-	if !takeMessageOwner() {
-		t.Fatal("exact \"1\" not taken")
+	if v := takeMessageOwner(); v != "1" {
+		t.Fatalf("took %q, want \"1\"", v)
 	}
 	if _, ok := os.LookupEnv(ownerEnv); ok {
 		t.Fatalf("%s still in the process environment", ownerEnv)
@@ -824,7 +901,7 @@ func TestOwnerOptInDoesNotReachChildProcesses(t *testing.T) {
 	proj := gitRepo(t, filepath.Join(t.TempDir(), "ownerproj"))
 	_ = os.Remove(dump) // gitRepo's own git init is not sock-mcp's
 	getenv := codexEnv(t, serve(t, f), "", proj, "")
-	peer, _ := handshakeWith(t, []string{"--outbound-only"}, getenv, true)
+	peer, _ := handshakeWith(t, []string{"--outbound-only"}, getenv, "1")
 	if !sendTool(t, peer, map[string]any{"text": "owner"}) {
 		t.Fatal("owner message refused")
 	}
@@ -848,7 +925,7 @@ func TestHostThatNeverActsGetsAtMostFivePushesAndNoAck(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		ct, st := mcp.NewInMemoryTransports()
 		done := make(chan struct{})
-		go func() { defer close(done); _ = run(ctx, []string{"--channel"}, getenv, false, io.Discard, st) }()
+		go func() { defer close(done); _ = run(ctx, []string{"--channel"}, getenv, "", io.Discard, st) }()
 		peer, err := ct.Connect(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -888,7 +965,7 @@ func TestRepliedReportsAPostedSend(t *testing.T) {
 	getenv := serve(t, f)
 	peer, _ := handshake(t, []string{"--outbound-only"}, getenv)
 	replied := func(conv string, since time.Time) error {
-		return run(t.Context(), []string{"replied", "--conversation", conv, "--since", strconv.FormatFloat(float64(since.UnixNano())/1e9, 'f', 3, 64)}, getenv, false, io.Discard, &mcp.StdioTransport{})
+		return run(t.Context(), []string{"replied", "--conversation", conv, "--since", strconv.FormatFloat(float64(since.UnixNano())/1e9, 'f', 3, 64)}, getenv, "", io.Discard, &mcp.StdioTransport{})
 	}
 	start := time.Now().Add(-time.Second)
 	if err := replied("c1", start); err == nil {
@@ -915,7 +992,7 @@ func TestRepliedRejectsBadArguments(t *testing.T) {
 		"no since":        {"replied", "--conversation", "c1"},
 		"bad since":       {"replied", "--conversation", "c1", "--since", "yesterday"},
 	} {
-		if err := run(t.Context(), args, getenv, false, io.Discard, &mcp.StdioTransport{}); err == nil {
+		if err := run(t.Context(), args, getenv, "", io.Discard, &mcp.StdioTransport{}); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
 	}
@@ -1351,7 +1428,7 @@ func claudeServer(t *testing.T, getenv func(string) string) (mcp.Connection, fun
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = run(ctx, []string{"--outbound-only", "--claude-inbound"}, getenv, false, io.Discard, st)
+		_ = run(ctx, []string{"--outbound-only", "--claude-inbound"}, getenv, "", io.Discard, st)
 	}()
 	peer, err := ct.Connect(ctx)
 	if err != nil {
@@ -1571,7 +1648,7 @@ func TestClaudeSessionWithoutAnInboxStillHoldsItsRunLock(t *testing.T) {
 
 func TestClaudeInboundExcludesTheOtherConsumers(t *testing.T) {
 	for _, extra := range []string{"--channel", "--codex-inbound"} {
-		err := run(t.Context(), []string{"--claude-inbound", extra}, func(string) string { return "" }, false, io.Discard, nil)
+		err := run(t.Context(), []string{"--claude-inbound", extra}, func(string) string { return "" }, "", io.Discard, nil)
 		if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
 			t.Fatalf("%s: %v", extra, err)
 		}

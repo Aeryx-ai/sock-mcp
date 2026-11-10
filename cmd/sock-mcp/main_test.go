@@ -1035,7 +1035,7 @@ func TestNoCredentialStartsAndEveryToolSaysToSignIn(t *testing.T) {
 				text = res.Content[0].Text
 				break
 			}
-			if text != "permanent: no sock credential: run `sock login` once" {
+			if text != "permanent: not signed in: run /sock:login, then /reload-plugins" {
 				t.Fatalf("%v %s: text %q", args, tool, text)
 			}
 		}

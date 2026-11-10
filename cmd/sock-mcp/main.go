@@ -446,9 +446,13 @@ func replied(args []string, getenv func(string) string, stderr io.Writer) error 
 // errNoReply is replied's answer when nothing was posted.
 var errNoReply = errors.New("no reply was posted in that conversation since then")
 
+// errNotSignedIn is every tool call's answer when sock-mcp started with no
+// credential: the plugin's sign-in, then a reload, which starts sock-mcp again.
+var errNotSignedIn = errors.New("permanent: not signed in: run /sock:login, then /reload-plugins")
+
 // serveWithoutCredential serves the same tools as a signed-in sock-mcp, and
-// every call answers "permanent: <ErrNoPuppetCredential>". No stream is
-// opened: there is nobody to listen as.
+// every call answers errNotSignedIn. No stream is opened: there is nobody to
+// listen as.
 func serveWithoutCredential(ctx context.Context, outbound bool, stderr io.Writer, transport mcp.Transport) error {
 	_, _ = fmt.Fprintln(stderr, "sock-mcp:", client.ErrNoPuppetCredential)
 	s := mcp.NewServer(&mcp.Implementation{Name: "sock", Version: version}, &mcp.ServerOptions{})
@@ -464,7 +468,7 @@ func serveWithoutCredential(ctx context.Context, outbound bool, stderr io.Writer
 			if method == "tools/call" {
 				return &mcp.CallToolResult{
 					IsError: true,
-					Content: []mcp.Content{&mcp.TextContent{Text: "permanent: " + client.ErrNoPuppetCredential.Error()}},
+					Content: []mcp.Content{&mcp.TextContent{Text: errNotSignedIn.Error()}},
 				}, nil
 			}
 			return next(ctx, method, req)

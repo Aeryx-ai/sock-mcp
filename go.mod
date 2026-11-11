@@ -4,7 +4,7 @@ go 1.26.9
 
 require (
 	connectrpc.com/connect v1.21.0
-	github.com/aeryx-ai/sock-client v0.2.2-0.20261110214730-808129b48c1a
+	github.com/aeryx-ai/sock-client v0.2.2
 	github.com/aeryx-ai/sock-contract v0.18.0
 	github.com/coder/websocket v1.8.14
 	github.com/modelcontextprotocol/go-sdk v1.8.0
